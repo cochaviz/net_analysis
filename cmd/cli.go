@@ -6,12 +6,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
 
@@ -19,37 +18,80 @@ import (
 )
 
 const (
-	defaultOutputDir          = "."
 	defaultWindowSizeS        = 30
-	defaultPacketRateThresh   = 120.0
+	defaultPacketRateThresh   = 5.0
 	defaultUniqueIPRateThresh = 10.0
 )
 
+var (
+	packetRateThreshold   = defaultPacketRateThresh
+	uniqueIPRateThreshold = defaultUniqueIPRateThresh
+	logLevelStr           = "debug"
+	windowSizeSeconds     = defaultWindowSizeS
+	outputFile            string
+)
+
+func init() {
+	RootCmd.Flags().Float64Var(
+		&packetRateThreshold,
+		"packet-threshold",
+		defaultPacketRateThresh,
+		"Packet rate threshold per window before marking traffic as suspicious.",
+	)
+	RootCmd.Flags().Float64Var(
+		&uniqueIPRateThreshold,
+		"ip-threshold",
+		defaultUniqueIPRateThresh,
+		"Destination IP diversity threshold per window before flagging a scan.",
+	)
+	RootCmd.Flags().StringVar(
+		&logLevelStr,
+		"log-level",
+		logLevelStr,
+		"Logging level (debug, info, warn, error).",
+	)
+	RootCmd.Flags().IntVar(
+		&windowSizeSeconds,
+		"window",
+		defaultWindowSizeS,
+		"Analysis window size in seconds.",
+	)
+	RootCmd.Flags().StringVar(
+		&outputFile,
+		"output",
+		"",
+		"Optional file path for JSON log output.",
+	)
+}
+
 var RootCmd = &cobra.Command{
-	Use:   "net_analysis <input> [output_dir] [window_size]",
+	Use:   "net_analysis <input> <src_ip>",
 	Short: "Analyze network traffic from a pcap file or live interface.",
-	Args:  cobra.RangeArgs(1, 3),
+	Args:  cobra.ExactArgs(2),
 	RunE:  executeAnalysis,
 }
 
 func executeAnalysis(cmd *cobra.Command, args []string) error {
 	input := args[0]
+	srcIP := args[1]
 
-	outputDir := defaultOutputDir
-	if len(args) >= 2 && args[1] != "" {
-		outputDir = args[1]
-	}
-	if err := ensureOutputDir(outputDir); err != nil {
+	if err := ensureOutputDir(path.Dir(outputFile)); err != nil {
 		return err
 	}
 
-	windowSize := defaultWindowSizeS
-	if len(args) == 3 {
-		parsed, err := strconv.Atoi(args[2])
-		if err != nil || parsed <= 0 {
-			return fmt.Errorf("window_size must be a positive integer number of seconds: %w", err)
-		}
-		windowSize = parsed
+	if packetRateThreshold <= 0 {
+		return fmt.Errorf("packet-threshold must be greater than 0, received %f", packetRateThreshold)
+	}
+	if uniqueIPRateThreshold < 0 {
+		return fmt.Errorf("ip-threshold must be non-negative, received %f", uniqueIPRateThreshold)
+	}
+	if windowSizeSeconds <= 0 {
+		return fmt.Errorf("window must be greater than 0, received %d", windowSizeSeconds)
+	}
+
+	level, err := parseLogLevel(logLevelStr)
+	if err != nil {
+		return err
 	}
 
 	handle, err := resolveHandle(input)
@@ -58,21 +100,45 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 	}
 
 	config := internal.NewAnalysisConfiguration(
-		"", // TODO: surface configurable src IP once available.
-		time.Duration(windowSize)*time.Second,
-		"", // direct logs to stdout for now.
-		allowAllEndpoints,
-		defaultPacketRateThresh,
-		defaultUniqueIPRateThresh,
-		slog.LevelInfo,
+		srcIP,
+		time.Duration(windowSizeSeconds)*time.Second,
+		outputFile,
+		nil,
+		packetRateThreshold,
+		uniqueIPRateThreshold,
+		level,
 	)
+	defer func() {
+		if err := config.Close(); err != nil {
+			cmd.PrintErrf("warning: unable to close log file: %v\n", err)
+		}
+	}()
 
 	if err := internal.CaptureLoop(handle, config); err != nil {
 		return fmt.Errorf("capture loop failed: %w", err)
 	}
 
-	cmd.Printf("Analysis complete. Output directory: %s\n", filepath.Clean(outputDir))
+	if outputFile != "" {
+		cmd.Printf("Analysis complete. Output file: %s\n", filepath.Clean(outputFile))
+	} else {
+		cmd.Printf("Analysis complete.")
+	}
 	return nil
+}
+
+func parseLogLevel(level string) (slog.Level, error) {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error", "err":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unsupported log-level %q (expected debug, info, warn, error)", level)
+	}
 }
 
 func resolveHandle(input string) (*pcap.Handle, error) {
@@ -96,13 +162,9 @@ func resolveHandle(input string) (*pcap.Handle, error) {
 	return HandleFromInterface(input)
 }
 
-func allowAllEndpoints(_ *gopacket.Endpoint) bool {
-	return true
-}
-
 func ensureOutputDir(path string) error {
 	if path == "" {
-		path = defaultOutputDir
+		return nil
 	}
 
 	info, err := os.Stat(path)
