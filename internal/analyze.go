@@ -9,15 +9,19 @@ import (
 )
 
 type AnalysisConfiguration struct {
+	// configuration
 	PacketRateThreshold float64
 	IPRateThreshold     float64
+	Window              time.Duration
+	savePackets         int    // number of packets to save, 0 means no packets are saved
+	pcapFile            string // pcapFile is a string because we make a new pcap for each analysis
+	heartbeat           bool   // include heartbeat packets in analysis
 
-	Window      time.Duration
-	savePackets int // number of packets to save, 0 means no packets are saved
-	eventFile   *os.File
-	pcapFile    string // pcapFile is a string because we make a new pcap for each analysis
-	logger      *slog.Logger
+	// instance references
+	eventFile *os.File
+	logger    *slog.Logger
 
+	// static context for logging
 	context AnalysisContext
 }
 
@@ -38,23 +42,25 @@ const (
 )
 
 type Behavior struct {
-	Classification BehaviorClass
-	Timestamp      time.Time
+	Classification BehaviorClass `json:"classification"`
+	Timestamp      time.Time     `json:"@timestamp"` // @timestamp to comply with Elastic
 
-	PacketRate      float64
-	PacketThreshold float64
-	IPRate          float64
-	IPRateThreshold float64
+	PacketRate      float64 `json:"packet_rate"`
+	PacketThreshold float64 `json:"packet_threshold"`
+	IPRate          float64 `json:"ip_rate"`
+	IPRateThreshold float64 `json:"ip_rate_threshold"`
 
-	SrcIP  *string
-	DstIPs *[]string
-	C2IP   *string
+	SampleID string    `json:"sample_id"`
+	SrcIP    *string   `json:"src_ip"`
+	DstIPs   *[]string `json:"dst_ips"`
+	C2IP     *string   `json:"c2_ip"`
 }
 
 func NewAnalysisConfiguration(
 	srcIP string,
 	c2IP string,
 	filterIPs []string,
+	heartbeat bool,
 	window time.Duration,
 	filePath string,
 	PacketThreshold float64,
@@ -86,6 +92,7 @@ func NewAnalysisConfiguration(
 		PacketRateThreshold: PacketThreshold,
 		IPRateThreshold:     IPThreshold,
 		Window:              window,
+		heartbeat:           heartbeat,
 		context: AnalysisContext{
 			srcIP:            srcIP,
 			c2IP:             c2IP,
@@ -138,7 +145,13 @@ func (config *AnalysisConfiguration) ProcessWindow(
 
 	switch behavior.Classification {
 	case Idle:
-		break
+		if config.heartbeat {
+			config.logger.Info(
+				"Idling",
+				"type", "heartbeat",
+				"behavior", behavior,
+			)
+		}
 	case Attack:
 		config.logger.Info(
 			"Detected an attack",
@@ -191,6 +204,7 @@ func (config *AnalysisConfiguration) classifyBehavior(
 				SrcIP:           &config.context.srcIP,
 				DstIPs:          destinationIPs,
 				C2IP:            &config.context.c2IP,
+				SampleID:        config.context.sampleID,
 			}
 		} else {
 			// detected an attack
@@ -204,6 +218,7 @@ func (config *AnalysisConfiguration) classifyBehavior(
 				SrcIP:           &config.context.srcIP,
 				DstIPs:          destinationIPs,
 				C2IP:            &config.context.c2IP,
+				SampleID:        config.context.sampleID,
 			}
 		}
 	}
@@ -215,8 +230,8 @@ func (config *AnalysisConfiguration) classifyBehavior(
 		IPRate:          newIPRate,
 		IPRateThreshold: config.IPRateThreshold,
 		SrcIP:           &config.context.srcIP,
-		DstIPs:          destinationIPs,
 		C2IP:            &config.context.c2IP,
+		SampleID:        config.context.sampleID,
 	}
 }
 

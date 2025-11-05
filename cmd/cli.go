@@ -28,6 +28,7 @@ var (
 	uniqueIPRateThreshold = defaultUniqueIPRateThresh
 	logLevelStr           = "debug"
 	windowSizeSeconds     = defaultWindowSizeS
+	heartbeat             bool
 	c2IP                  string
 	sampleID              string
 	ignoreDestIPs         []string
@@ -83,6 +84,12 @@ func init() {
 		"",
 		"Optional file path for JSON log output.",
 	)
+	RootCmd.Flags().BoolVar(
+		&heartbeat,
+		"heartbeat",
+		false,
+		"Enable heartbeat logging (disabled by default).",
+	)
 }
 
 var RootCmd = &cobra.Command{
@@ -128,6 +135,7 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		srcIP,
 		c2IP,
 		ignoreDestIPs,
+		heartbeat,
 		time.Duration(windowSizeSeconds)*time.Second,
 		outputFile,
 		packetRateThreshold,
