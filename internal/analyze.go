@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"slices"
 	"time"
 
 	"github.com/google/gopacket"
@@ -39,11 +38,12 @@ type AnalysisConfiguration struct {
 }
 
 type batchResult struct {
-	windowStart      time.Time
-	hostPacketRate   map[string]float64
-	globalPacketRate float64
-	globalIPRate     float64
-	numBatches       int
+	windowStart       time.Time
+	hostPacketCounts  map[string]int
+	globalPacketCount int
+	globalNewIPCount  int
+	totalDuration     time.Duration
+	numBatches        int
 }
 
 type AnalysisContext struct {
@@ -106,7 +106,7 @@ func NewAnalysisConfiguration(
 // ProcessBatch processes a (subset) of a window of packets and saves
 // intermediate results.
 func (config *AnalysisConfiguration) ProcessBatch(
-	previousBatch []gopacket.Packet,
+	_ []gopacket.Packet,
 	batch []gopacket.Packet,
 	windowStart time.Time,
 ) {
@@ -120,27 +120,90 @@ func (config *AnalysisConfiguration) ProcessBatch(
 		config.logger.Error("Error getting last packet time", "error", err)
 		return
 	}
-	windowSize := lastPacketTime.Sub(windowStart)
+	firstTime, firstErr := firstPacketTime(&batch)
+	if firstErr != nil || firstTime.IsZero() {
+		firstTime = windowStart
+	}
+
+	windowSize := lastPacketTime.Sub(firstTime)
 	if windowSize <= 0 {
 		windowSize = config.Window
 	}
 
 	_, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
-	_, previousDstIPs := filterIPsBatch(previousBatch, &config.context.uninterestingIPs)
 
-	globalPacketRate, localPacketRates, err := calculatePacketRate(&batch, windowSize, &config.context.uninterestingIPs, 512)
-
+	globalPacketCount, localPacketCounts, err := countPacketsByHost(&batch, &config.context.uninterestingIPs, 512)
 	if err != nil {
-		config.logger.Error("Error calculating packet rate", "error", err)
+		config.logger.Error("Error counting packet totals", "error", err)
 	}
 
-	ipRate := calculateIPRate(&previousDstIPs, &dstIPs, config.Window)
+	newIPCount := 0
+	if len(dstIPs) > 0 {
+		for _, ip := range dstIPs {
+			if ip == "" {
+				continue
+			}
+			if config.result.hostPacketCounts == nil {
+				newIPCount++
+				continue
+			}
+			if _, seen := config.result.hostPacketCounts[ip]; !seen {
+				newIPCount++
+			}
+		}
+	}
 
-	// Save intermediate results, since batch results are already normalized, we can just average them
-	config.result.globalPacketRate = (globalPacketRate + config.result.globalPacketRate)
-	config.result.hostPacketRate = *resolveHostRates(&config.result.hostPacketRate, &localPacketRates)
-	config.result.globalIPRate = (ipRate + config.result.globalIPRate)
+	// Save intermediate results; normalization happens when the window flushes.
+	config.result.globalPacketCount += globalPacketCount
+	config.result.hostPacketCounts = mergeHostCounts(config.result.hostPacketCounts, localPacketCounts)
+	config.result.globalNewIPCount += newIPCount
+	config.result.totalDuration += windowSize
 	config.result.numBatches++
+}
+
+func (config *AnalysisConfiguration) flushResults() {
+	if config.result.numBatches == 0 {
+		return
+	}
+
+	config.logger.Debug(
+		"Flushing results",
+		"numBatches", config.result.numBatches,
+		"globalPacketCount", config.result.globalPacketCount,
+		"hostPacketCounts", config.result.hostPacketCounts,
+		"globalNewIPCount", config.result.globalNewIPCount,
+		"totalDuration", config.result.totalDuration,
+	)
+
+	durationSeconds := config.result.totalDuration.Seconds()
+	if durationSeconds <= 0 {
+		durationSeconds = config.Window.Seconds()
+	}
+	if durationSeconds <= 0 {
+		config.logger.Warn("Unable to normalize rates due to non-positive duration", "window", config.Window)
+		durationSeconds = 1
+	}
+
+	// classify and log behaviors
+	for host, count := range config.result.hostPacketCounts {
+		packetRate := float64(count) / durationSeconds
+		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart)
+		config.logBehavior(localBehavior, nil)
+	}
+
+	globalPacketRate := float64(config.result.globalPacketCount) / durationSeconds
+	globalIPRate := float64(config.result.globalNewIPCount) / durationSeconds
+
+	globalBehavior := config.classifyGlobalBehavior(
+		globalPacketRate,
+		globalIPRate,
+		nil,
+		config.result.windowStart,
+	)
+	config.logBehavior(globalBehavior, nil)
+
+	// clear results after flush
+	config.result = batchResult{}
 }
 
 func (config *AnalysisConfiguration) logBehavior(
@@ -176,43 +239,6 @@ func (config *AnalysisConfiguration) logBehavior(
 	default:
 		break
 	}
-}
-
-func (config *AnalysisConfiguration) flushResults() {
-	if config.result.numBatches == 0 {
-		return
-	}
-
-	config.logger.Debug(
-		"Flushing results",
-		"numBatches", config.result.numBatches,
-		"globalPacketRate", config.result.globalPacketRate,
-		"hostPacketRate", config.result.hostPacketRate,
-		"globalIPRate", config.result.globalIPRate,
-	)
-
-	// normalize results
-	config.result.globalPacketRate = config.result.globalPacketRate / float64(config.result.numBatches)
-	config.result.hostPacketRate = *normalizeHostRates(&config.result.hostPacketRate, float64(config.result.numBatches))
-	config.result.globalIPRate = config.result.globalIPRate / float64(config.result.numBatches)
-	config.result.numBatches = 0
-
-	// classify and log behaviors
-	for host, packetRate := range config.result.hostPacketRate {
-		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart)
-		config.logBehavior(localBehavior, nil)
-	}
-
-	globalBehavior := config.classifyGlobalBehavior(
-		config.result.globalPacketRate,
-		config.result.globalIPRate,
-		nil,
-		config.result.windowStart,
-	)
-	config.logBehavior(globalBehavior, nil)
-
-	// clear results after flush
-	config.result = batchResult{}
 }
 
 func (config *AnalysisConfiguration) classifyLocalBehavior(
@@ -390,19 +416,45 @@ func filterIPsBatch(batch []gopacket.Packet, filterIPs *[]string) ([]gopacket.Pa
 	return filteredBatch, dstIPs
 }
 
-// CalculatePacketRate calculates the packet rate of a given slice of packets,
-// normalized by the configured window duration.
-func calculatePacketRate(
+func mergeHostCounts(acc map[string]int, batch map[string]int) map[string]int {
+	if len(batch) == 0 {
+		return acc
+	}
+
+	if acc == nil {
+		acc = make(map[string]int, len(batch))
+	}
+
+	for host, count := range batch {
+		acc[host] += count
+	}
+
+	return acc
+}
+
+// countPacketsByHost tallies packets overall and per destination host.
+func countPacketsByHost(
 	pkts *[]gopacket.Packet,
-	window time.Duration,
 	excludeIPs *[]string,
 	maxHosts int,
-) (float64, map[string]float64, error) {
+) (int, map[string]int, error) {
 	if pkts == nil || len(*pkts) == 0 {
-		return 0.0, nil, nil
+		return 0, nil, nil
 	}
-	hostRates := make(map[string]float64, maxHosts)
-	count := 0
+
+	hostCounts := make(map[string]int, maxHosts)
+	total := 0
+
+	var exclude map[string]struct{}
+	if excludeIPs != nil && len(*excludeIPs) > 0 {
+		exclude = make(map[string]struct{}, len(*excludeIPs))
+		for _, ip := range *excludeIPs {
+			if ip == "" {
+				continue
+			}
+			exclude[ip] = struct{}{}
+		}
+	}
 
 	for _, packet := range *pkts {
 		if packet == nil {
@@ -415,90 +467,20 @@ func calculatePacketRate(
 
 		dst := networkLayer.NetworkFlow().Dst().String()
 
-		if !slices.Contains(*excludeIPs, dst) {
-			count++
-
-			if len(hostRates) < maxHosts {
-				hostRates[dst] += 1.0
-			} else {
-				normalizeHostRates(&hostRates, window.Seconds())
-				return float64(count) / window.Seconds(), hostRates, MaxHostsReached{}
-			}
-		}
-	}
-	normalizeHostRates(&hostRates, window.Seconds())
-	return float64(count) / window.Seconds(), hostRates, nil
-}
-
-func normalizeHostRates(hostRates *map[string]float64, factor float64) *map[string]float64 {
-	for host, _ := range *hostRates {
-		(*hostRates)[host] /= factor
-	}
-
-	return hostRates
-}
-
-// resolveHostRates resolves the host rates between two maps. It updates the
-// first map with the rates from the second map in place. For sanity's sake
-// it also returns a reference to the updated map.
-func resolveHostRates(hostRatesA *map[string]float64, hostRatesB *map[string]float64) *map[string]float64 {
-	if hostRatesA == nil || hostRatesB == nil {
-		return hostRatesA
-	}
-	if len(*hostRatesA) == 0 || len(*hostRatesB) == 0 {
-		return hostRatesA
-	}
-	if hostRatesA == hostRatesB {
-		return hostRatesA
-	}
-
-	for host, rate := range *hostRatesB {
-		// ensure an entry exists for the host in hostRatesA
-		if _, ok := (*hostRatesA)[host]; !ok {
-			(*hostRatesA)[host] = 0.0
-		}
-		(*hostRatesA)[host] += rate
-	}
-
-	return hostRatesA
-}
-
-// calculateIPRate returns the count of destination IPs in the current window that were
-// not seen in the previous window.
-func calculateIPRate(
-	previousIPs *[]string,
-	currentIPs *[]string,
-	window time.Duration,
-) float64 {
-	if currentIPs == nil || len(*currentIPs) == 0 {
-		return 0.0
-	}
-
-	var seen map[string]struct{}
-	if previousIPs != nil && len(*previousIPs) > 0 {
-		seen = make(map[string]struct{}, len(*previousIPs))
-		for _, ip := range *previousIPs {
-			if ip == "" {
-				continue
-			}
-			seen[ip] = struct{}{}
-		}
-	}
-
-	newCount := 0
-	for _, ip := range *currentIPs {
-		if ip == "" {
+		if _, skip := exclude[dst]; skip {
 			continue
 		}
-		if seen != nil {
-			if _, exists := seen[ip]; exists {
-				continue
-			}
+
+		total++
+
+		if len(hostCounts) < maxHosts || hostCounts[dst] > 0 {
+			hostCounts[dst]++
+		} else {
+			return total, hostCounts, MaxHostsReached{}
 		}
-		newCount++
 	}
 
-	return float64(newCount) / window.Seconds()
+	return total, hostCounts, nil
 }
 
 // getEventTime returns the timestamp of the start of the window, or of the
@@ -533,6 +515,21 @@ func lastPacketTime(batch *[]gopacket.Packet) (time.Time, error) {
 	lastPacket := (*batch)[len(*batch)-1]
 
 	if md := lastPacket.Metadata(); md != nil {
+		return md.Timestamp, nil
+	}
+
+	return time.Time{}, errors.New("No metadata available")
+}
+
+// firstPacketTime returns the timestamp of the first packet in the batch or an error
+// if the batch is empty or lacks metadata.
+func firstPacketTime(batch *[]gopacket.Packet) (time.Time, error) {
+	if batch == nil || len(*batch) == 0 {
+		return time.Time{}, errors.New("No packets in batch")
+	}
+
+	firstPacket := (*batch)[0]
+	if md := firstPacket.Metadata(); md != nil {
 		return md.Timestamp, nil
 	}
 
