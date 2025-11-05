@@ -135,7 +135,7 @@ func worker(config *AnalysisConfiguration, in <-chan windowBatch, done chan<- st
 			"previousCount", len(previous.packets),
 			"currentCount", len(batch.packets),
 		)
-		config.ProcessWindow(previous.packets, batch.packets, batch.start)
+		config.ProcessBatch(previous.packets, batch.packets, batch.start)
 		previous = batch
 	}
 
@@ -144,7 +144,7 @@ func worker(config *AnalysisConfiguration, in <-chan windowBatch, done chan<- st
 			"Flushing final packet window",
 			"previousCount", len(previous.packets),
 		)
-		config.ProcessWindow(previous.packets, nil, previous.start)
+		config.ProcessBatch(previous.packets, nil, previous.start)
 	}
 }
 
