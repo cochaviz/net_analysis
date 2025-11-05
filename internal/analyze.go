@@ -3,7 +3,6 @@ package internal
 import (
 	"log/slog"
 	"os"
-	"slices"
 	"time"
 
 	"github.com/google/gopacket"
@@ -77,6 +76,10 @@ func NewAnalysisConfiguration(
 		logger = slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level}))
 	}
 
+	if window <= 0 {
+		panic("window duration must be greater than zero")
+	}
+
 	return &AnalysisConfiguration{
 		logger:              logger,
 		eventFile:           file,
@@ -111,12 +114,8 @@ func (config *AnalysisConfiguration) ProcessWindow(
 	filteredBatch, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
 	_, previousDstIPs := filterIPsBatch(previousBatch, &config.context.uninterestingIPs)
 
-	packetRate := calculatePacketRate(&filteredBatch)
-	ipRate := calculateIPRate(
-		&previousDstIPs,
-		&dstIPs,
-		config.Window,
-	)
+	packetRate := calculatePacketRate(&filteredBatch, config.Window)
+	ipRate := calculateIPRate(&previousDstIPs, &dstIPs, config.Window)
 
 	eventTime := windowStart
 	if eventTime.IsZero() {
@@ -185,8 +184,8 @@ func (config *AnalysisConfiguration) classifyBehavior(
 			return Behavior{
 				Classification:  Scan,
 				Timestamp:       eventTime,
-				PacketRate:      newIPRate,
-				PacketThreshold: config.IPRateThreshold,
+				PacketRate:      packetRate,
+				PacketThreshold: config.PacketRateThreshold,
 				IPRate:          newIPRate,
 				IPRateThreshold: config.IPRateThreshold,
 				SrcIP:           &config.context.srcIP,
@@ -264,36 +263,50 @@ func filterIPsBatch(batch []gopacket.Packet, filterIPs *[]string) ([]gopacket.Pa
 	return filteredBatch, dstIPs
 }
 
-// CalculatePacketRate calculates the packet rate of a given slice of packets.
-func calculatePacketRate(pkts *[]gopacket.Packet) float64 {
+// CalculatePacketRate calculates the packet rate of a given slice of packets,
+// normalized by the configured window duration.
+func calculatePacketRate(pkts *[]gopacket.Packet, window time.Duration) float64 {
 	if pkts == nil || len(*pkts) == 0 {
 		return 0.0
 	}
 
-	startTime := (*pkts)[0].Metadata().Timestamp
-	endTime := (*pkts)[len(*pkts)-1].Metadata().Timestamp
-
-	duration := endTime.Sub(startTime).Seconds()
-	rate := float64(len(*pkts)) / duration
-
-	return rate
+	return float64(len(*pkts)) / window.Seconds()
 }
 
-// Calculates the new IP rate. Here, new IPs are IPs that are not in the previous batch.
+// calculateIPRate returns the count of destination IPs in the current window that were
+// not seen in the previous window.
 func calculateIPRate(
 	previousIPs *[]string,
 	currentIPs *[]string,
-	windowSize time.Duration,
+	window time.Duration,
 ) float64 {
 	if currentIPs == nil || len(*currentIPs) == 0 {
 		return 0.0
 	}
-	numNewIPs := []string{}
-	for _, ip := range *currentIPs {
-		if !slices.Contains(*previousIPs, ip) {
-			numNewIPs = append(numNewIPs, ip)
+
+	var seen map[string]struct{}
+	if previousIPs != nil && len(*previousIPs) > 0 {
+		seen = make(map[string]struct{}, len(*previousIPs))
+		for _, ip := range *previousIPs {
+			if ip == "" {
+				continue
+			}
+			seen[ip] = struct{}{}
 		}
 	}
-	rate := float64(len(numNewIPs)) / windowSize.Seconds()
-	return rate
+
+	newCount := 0
+	for _, ip := range *currentIPs {
+		if ip == "" {
+			continue
+		}
+		if seen != nil {
+			if _, exists := seen[ip]; exists {
+				continue
+			}
+		}
+		newCount++
+	}
+
+	return float64(newCount) / window.Seconds()
 }
