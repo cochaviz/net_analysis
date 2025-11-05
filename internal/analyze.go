@@ -3,12 +3,19 @@ package internal
 import (
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/google/gopacket"
 )
 
 // == Analysis
+
+type MaxHostsReached struct{}
+
+func (e MaxHostsReached) Error() string {
+	return "maximum number of hosts reached"
+}
 
 type AnalysisConfiguration struct {
 	// configuration
@@ -66,6 +73,9 @@ func NewAnalysisConfiguration(
 		panic("window duration must be greater than zero")
 	}
 
+	// source and C2 IPs should be excluded from analysis
+	filterIPs = append(filterIPs, srcIP, c2IP)
+
 	return &AnalysisConfiguration{
 		logger:              logger,
 		eventFile:           file,
@@ -89,17 +99,30 @@ func (config *AnalysisConfiguration) ProcessWindow(
 	batch []gopacket.Packet,
 	windowStart time.Time,
 ) {
-	filteredBatch, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
+
+	_, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
 	_, previousDstIPs := filterIPsBatch(previousBatch, &config.context.uninterestingIPs)
 
-	packetRate := calculatePacketRate(&filteredBatch, config.Window)
+	packetRate, hostRates, err := calculatePacketRate(&batch, config.Window, &config.context.uninterestingIPs, 512)
+
+	if err != nil {
+		config.logger.Error("Error calculating packet rate", "error", err)
+	}
+
 	ipRate := calculateIPRate(&previousDstIPs, &dstIPs, config.Window)
 
-	eventTime := getEventTime(windowStart, &batch, &filteredBatch)
+	eventTime := getEventTime(windowStart, &batch)
 
-	behavior := config.classifyGlobalBehavior(packetRate, ipRate, &dstIPs, eventTime)
+	for host, hostRate := range hostRates {
+		localBehavior := config.classifyLocalBehavior(
+			hostRate, host,
+			eventTime, // should be changed!
+		)
+		config.logBehavior(localBehavior, batch)
+	}
 
-	config.logBehavior(behavior, filteredBatch)
+	globalBehavior := config.classifyGlobalBehavior(packetRate, ipRate, &dstIPs, eventTime)
+	config.logBehavior(globalBehavior, batch)
 }
 
 func (config *AnalysisConfiguration) logBehavior(
@@ -142,6 +165,13 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 	destinationIP string,
 	eventTime time.Time,
 ) *Behavior {
+	config.logger.Debug(
+		"Classifying local behavior",
+		"packetRate", packetRate,
+		"threshold", config.PacketRateThreshold,
+		"destinationIP", destinationIP,
+	)
+
 	if packetRate > config.PacketRateThreshold {
 		return &Behavior{
 			Classification:  Attack,
@@ -307,12 +337,48 @@ func filterIPsBatch(batch []gopacket.Packet, filterIPs *[]string) ([]gopacket.Pa
 
 // CalculatePacketRate calculates the packet rate of a given slice of packets,
 // normalized by the configured window duration.
-func calculatePacketRate(pkts *[]gopacket.Packet, window time.Duration) float64 {
+func calculatePacketRate(
+	pkts *[]gopacket.Packet,
+	window time.Duration,
+	excludeIPs *[]string,
+	maxHosts int,
+) (float64, map[string]float64, error) {
 	if pkts == nil || len(*pkts) == 0 {
-		return 0.0
+		return 0.0, nil, nil
 	}
+	hostRates := make(map[string]float64, maxHosts)
+	count := 0
 
-	return float64(len(*pkts)) / window.Seconds()
+	for _, packet := range *pkts {
+		if packet == nil {
+			continue
+		}
+		networkLayer := packet.NetworkLayer()
+		if networkLayer == nil {
+			continue
+		}
+
+		dst := networkLayer.NetworkFlow().Dst().String()
+
+		if !slices.Contains(*excludeIPs, dst) {
+			count++
+
+			if len(hostRates) < maxHosts {
+				hostRates[dst] += 1.0
+			} else {
+				normalizeHostRates(&hostRates, window)
+				return float64(count) / window.Seconds(), hostRates, MaxHostsReached{}
+			}
+		}
+	}
+	normalizeHostRates(&hostRates, window)
+	return float64(count) / window.Seconds(), hostRates, nil
+}
+
+func normalizeHostRates(hostRates *map[string]float64, interval time.Duration) {
+	for host, _ := range *hostRates {
+		(*hostRates)[host] /= float64(interval.Seconds())
+	}
 }
 
 // calculateIPRate returns the count of destination IPs in the current window that were
@@ -359,16 +425,11 @@ func calculateIPRate(
 func getEventTime(
 	windowStart time.Time,
 	batch *[]gopacket.Packet,
-	filteredBatch *[]gopacket.Packet,
 ) time.Time {
 	eventTime := windowStart
 
 	if eventTime.IsZero() {
-		if filteredBatch != nil && len(*filteredBatch) > 0 {
-			if md := (*filteredBatch)[0].Metadata(); md != nil {
-				eventTime = md.Timestamp
-			}
-		} else if batch != nil && len(*batch) > 0 {
+		if batch != nil && len(*batch) > 0 {
 			if md := (*batch)[0].Metadata(); md != nil {
 				eventTime = md.Timestamp
 			}
