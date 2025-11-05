@@ -8,6 +8,8 @@ import (
 	"github.com/google/gopacket"
 )
 
+// == Analysis
+
 type AnalysisConfiguration struct {
 	// configuration
 	PacketRateThreshold float64
@@ -16,6 +18,7 @@ type AnalysisConfiguration struct {
 	savePackets         int    // number of packets to save, 0 means no packets are saved
 	pcapFile            string // pcapFile is a string because we make a new pcap for each analysis
 	heartbeat           bool   // include heartbeat packets in analysis
+	hostCount           map[string]int
 
 	// instance references
 	eventFile *os.File
@@ -31,29 +34,6 @@ type AnalysisContext struct {
 	c2IP             string
 	sampleID         string   // unique identifier to match behavior to a malware sample
 	uninterestingIPs []string // List of IP addresses that are not interesting for analysis
-}
-
-type BehaviorClass string // Classification of the behavior in a particular window
-
-const (
-	Attack BehaviorClass = "attack"
-	Scan   BehaviorClass = "scanning"
-	Idle   BehaviorClass = ""
-)
-
-type Behavior struct {
-	Classification BehaviorClass `json:"classification"`
-	Timestamp      time.Time     `json:"@timestamp"` // @timestamp to comply with Elastic
-
-	PacketRate      float64 `json:"packet_rate"`
-	PacketThreshold float64 `json:"packet_threshold"`
-	IPRate          float64 `json:"ip_rate"`
-	IPRateThreshold float64 `json:"ip_rate_threshold"`
-
-	SampleID string    `json:"sample_id"`
-	SrcIP    *string   `json:"src_ip"`
-	DstIPs   *[]string `json:"dst_ips"`
-	C2IP     *string   `json:"c2_ip"`
 }
 
 func NewAnalysisConfiguration(
@@ -102,15 +82,6 @@ func NewAnalysisConfiguration(
 	}
 }
 
-func (config *AnalysisConfiguration) Close() error {
-	if config == nil || config.eventFile == nil {
-		return nil
-	}
-	err := config.eventFile.Close()
-	config.eventFile = nil
-	return err
-}
-
 // ProcessWindow processes a window of packets and logs the observed behavior.
 // It detects anomalies based on the configured thresholds.
 func (config *AnalysisConfiguration) ProcessWindow(
@@ -141,7 +112,18 @@ func (config *AnalysisConfiguration) ProcessWindow(
 		eventTime = time.Now()
 	}
 
-	behavior := config.classifyBehavior(packetRate, ipRate, &dstIPs, eventTime)
+	behavior := config.classifyGlobalBehavior(packetRate, ipRate, &dstIPs, eventTime)
+
+	config.logBehavior(behavior, filteredBatch)
+}
+
+func (config *AnalysisConfiguration) logBehavior(
+	behavior *Behavior,
+	packets []gopacket.Packet,
+) {
+	if behavior == nil {
+		return
+	}
 
 	switch behavior.Classification {
 	case Idle:
@@ -158,7 +140,7 @@ func (config *AnalysisConfiguration) ProcessWindow(
 			"type", "event",
 			"behavior", behavior,
 		)
-		WritePackets(config.pcapFile, filteredBatch)
+		WritePackets(config.pcapFile, packets)
 	case Scan:
 		config.logger.Info(
 			"Detected a scan",
@@ -170,48 +152,58 @@ func (config *AnalysisConfiguration) ProcessWindow(
 	}
 }
 
-func (config *AnalysisConfiguration) classifyBehavior(
+func (config *AnalysisConfiguration) classifyLocalBehavior(
 	packetRate float64,
+	destinationIP string,
+	eventTime time.Time,
+) *Behavior {
+	if packetRate > config.PacketRateThreshold {
+		return &Behavior{
+			Classification:  Attack,
+			Scope:           Local,
+			Timestamp:       eventTime,
+			PacketRate:      packetRate,
+			PacketThreshold: config.PacketRateThreshold,
+			IPRate:          0,
+			IPRateThreshold: 0,
+			DstIP:           &destinationIP,
+			SrcIP:           &config.context.srcIP,
+		}
+	}
+	return nil
+}
+
+func (config *AnalysisConfiguration) classifyGlobalBehavior(
+	globalPacketRate float64,
 	newIPRate float64,
 	destinationIPs *[]string,
 	eventTime time.Time,
-) Behavior {
+) *Behavior {
 	// found an anomalous activity
-	if packetRate > config.PacketRateThreshold {
+	if globalPacketRate > config.PacketRateThreshold {
 		config.logger.Debug(
-			"Detected high packet rate",
-			"packetRate", packetRate,
-			"threshold", config.PacketRateThreshold,
+			"Detected global high packet rate",
+			"scope", Global,
 			"eventTime", eventTime,
+			"packetRate", globalPacketRate,
+			"threshold", config.PacketRateThreshold,
 		)
 
 		// detected a scan
 		if newIPRate > config.IPRateThreshold {
 			config.logger.Debug(
 				"Detected high new IP rate",
+				"scope", Global,
+				"eventTime", eventTime,
 				"newIPRate", newIPRate,
 				"threshold", config.IPRateThreshold,
-				"eventTime", eventTime,
 			)
 
-			return Behavior{
+			return &Behavior{
 				Classification:  Scan,
+				Scope:           Global,
 				Timestamp:       eventTime,
-				PacketRate:      packetRate,
-				PacketThreshold: config.PacketRateThreshold,
-				IPRate:          newIPRate,
-				IPRateThreshold: config.IPRateThreshold,
-				SrcIP:           &config.context.srcIP,
-				DstIPs:          destinationIPs,
-				C2IP:            &config.context.c2IP,
-				SampleID:        config.context.sampleID,
-			}
-		} else {
-			// detected an attack
-			return Behavior{
-				Classification:  Attack,
-				Timestamp:       eventTime,
-				PacketRate:      packetRate,
+				PacketRate:      globalPacketRate,
 				PacketThreshold: config.PacketRateThreshold,
 				IPRate:          newIPRate,
 				IPRateThreshold: config.IPRateThreshold,
@@ -222,18 +214,68 @@ func (config *AnalysisConfiguration) classifyBehavior(
 			}
 		}
 	}
-	return Behavior{
+
+	return &Behavior{
 		Classification:  Idle,
+		Scope:           Global,
 		Timestamp:       eventTime,
-		PacketRate:      packetRate,
+		PacketRate:      globalPacketRate,
 		PacketThreshold: config.PacketRateThreshold,
 		IPRate:          newIPRate,
 		IPRateThreshold: config.IPRateThreshold,
 		SrcIP:           &config.context.srcIP,
+		DstIPs:          destinationIPs,
 		C2IP:            &config.context.c2IP,
 		SampleID:        config.context.sampleID,
 	}
 }
+
+// == Behavior
+
+type BehaviorScope string
+
+const (
+	Global BehaviorScope = "global"
+	Local  BehaviorScope = "local"
+)
+
+type BehaviorClass string // Classification of the behavior in a particular window
+
+const (
+	Attack BehaviorClass = "attack"
+	Scan   BehaviorClass = "scanning"
+	Idle   BehaviorClass = ""
+)
+
+type Behavior struct {
+	Classification BehaviorClass `json:"classification"`
+	Scope          BehaviorScope `json:"scope"`      // Indicates the scope of the behavior (global/local)
+	Timestamp      time.Time     `json:"@timestamp"` // @timestamp to comply with Elastic
+
+	PacketRate      float64 `json:"packet_rate"`
+	PacketThreshold float64 `json:"packet_threshold"`
+	IPRate          float64 `json:"ip_rate"`
+	IPRateThreshold float64 `json:"ip_rate_threshold"`
+
+	SampleID string  `json:"sample_id"`
+	SrcIP    *string `json:"src_ip"`
+	C2IP     *string `json:"c2_ip"`
+
+	// Destination IP/s depending on the scope
+	DstIPs *[]string `json:"dst_ips"`
+	DstIP  *string   `json:"dst_ip"`
+}
+
+func (config *AnalysisConfiguration) Close() error {
+	if config == nil || config.eventFile == nil {
+		return nil
+	}
+	err := config.eventFile.Close()
+	config.eventFile = nil
+	return err
+}
+
+// == Helper Functions
 
 // filterIPsBatch filters a batch of packets based on a given IP filter function
 // and the destination IP and returns the filtered batch as well as the
