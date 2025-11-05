@@ -1,7 +1,7 @@
 package main
 
 import (
-	"cochaviz/net_analysis/cmd"
+	"cochaviz/gomon/cmd"
 
 	"github.com/spf13/cobra"
 )

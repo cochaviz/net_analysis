@@ -1,4 +1,4 @@
-module cochaviz/net_analysis
+module cochaviz/gomon
 
 go 1.24.4
 

@@ -138,6 +138,9 @@ func (config *AnalysisConfiguration) ProcessBatch(
 	batch []gopacket.Packet,
 	windowStart time.Time,
 ) {
+	if len(batch) == 0 {
+		return
+	}
 	if config.result.windowStart.IsZero() {
 		config.result.windowStart = windowStart
 	}
