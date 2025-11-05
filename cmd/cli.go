@@ -17,6 +17,15 @@ import (
 	"cochaviz/gomon/internal"
 )
 
+const asciiBanner = `
+     _______    ______   ___ __ __   ______   ___   __
+    /______/\  /_____/\ /__//_//_/\ /_____/\ /__/\ /__/\
+    \::::__\/__\:::_ \ \\::\| \| \ \\:::_ \ \\::\_\\  \ \
+     \:\ /____/\\:\ \ \ \\:.      \ \\:\ \ \ \\:.  -\  \ \
+      \:\\_  _\/ \:\ \ \ \\:.\-/\  \ \\:\ \ \ \\:. _    \ \
+       \:\_\ \ \  \:\_\ \ \\. \  \  \ \\:\_\ \ \\. \ -\  \ \
+        \_____\/   \_____\/ \__\/ \__\/ \_____\/ \__\/ \__\/`
+
 const (
 	defaultWindowSizeS        = 30
 	defaultPacketRateThresh   = 5.0
@@ -108,7 +117,11 @@ identifies time windows that exceed packet-rate or destination-IP thresholds. Th
 structured alerts that highlight scans or bursts of suspicious activity.`,
 	Example: "gomon sample.pcap 10.0.0.5 --window 15 --packet-threshold 20 --log-level info --c2-ip 203.0.113.4 --ignore-dst 192.0.2.10 --sample-id malware-sample-42",
 	Args:    cobra.ExactArgs(2),
-	RunE:    executeAnalysis,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		cmd.Println(asciiBanner)
+		cmd.Println()
+	},
+	RunE: executeAnalysis,
 }
 
 func executeAnalysis(cmd *cobra.Command, args []string) error {
