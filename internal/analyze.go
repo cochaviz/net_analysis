@@ -223,22 +223,40 @@ func (config *AnalysisConfiguration) classifyBehavior(
 // and the destination IP and returns the filtered batch as well as the
 // destination IPs.
 func filterIPsBatch(batch []gopacket.Packet, filterIPs *[]string) ([]gopacket.Packet, []string) {
-	var filteredBatch []gopacket.Packet
+	filteredBatch := make([]gopacket.Packet, 0, len(batch))
 	dstIPs := make([]string, 0, len(batch))
 	seen := make(map[string]struct{}, len(batch))
+
+	var ignore map[string]struct{}
+	if filterIPs != nil && len(*filterIPs) > 0 {
+		ignore = make(map[string]struct{}, len(*filterIPs))
+		for _, ip := range *filterIPs {
+			if ip == "" {
+				continue
+			}
+			ignore[ip] = struct{}{}
+		}
+	}
 
 	for _, packet := range batch {
 		if packet == nil {
 			continue
 		}
+		networkLayer := packet.NetworkLayer()
+		if networkLayer == nil {
+			continue
+		}
+		dst := networkLayer.NetworkFlow().Dst().String()
 
-		if filterIPs != nil {
-			if _, ok := seen[packet.NetworkLayer().NetworkFlow().Dst().String()]; !ok {
-				dstIPs = append(dstIPs, packet.NetworkLayer().NetworkFlow().Dst().String())
-				seen[packet.NetworkLayer().NetworkFlow().Dst().String()] = struct{}{}
-			}
+		if _, skip := ignore[dst]; skip {
+			continue
 		}
 
+		filteredBatch = append(filteredBatch, packet)
+		if _, ok := seen[dst]; !ok {
+			dstIPs = append(dstIPs, dst)
+			seen[dst] = struct{}{}
+		}
 	}
 
 	return filteredBatch, dstIPs
