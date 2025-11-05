@@ -1,1 +1,3 @@
 *.json
+*.jsonl
+.DS_Store
