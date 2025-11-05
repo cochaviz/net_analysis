@@ -19,14 +19,15 @@ import (
 
 const (
 	defaultWindowSizeS        = 30
-	defaultPacketRateThresh   = 5.0
+	defaultPacketRateThresh   = 1.5
 	defaultUniqueIPRateThresh = 10.0
+	defaultLogLevel           = "info"
 )
 
 var (
 	packetRateThreshold   = defaultPacketRateThresh
 	uniqueIPRateThreshold = defaultUniqueIPRateThresh
-	logLevelStr           = "debug"
+	logLevelStr           = defaultLogLevel
 	windowSizeSeconds     = defaultWindowSizeS
 	heartbeat             bool
 	c2IP                  string
