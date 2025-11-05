@@ -97,21 +97,6 @@ func (config *AnalysisConfiguration) Close() error {
 	return err
 }
 
-func composeEndpointFilter(src string, base func(*gopacket.Endpoint) bool) func(*gopacket.Endpoint) bool {
-	return func(ep *gopacket.Endpoint) bool {
-		if ep == nil {
-			return false
-		}
-		if ep.String() == src {
-			return false
-		}
-		if base == nil {
-			return true
-		}
-		return base(ep)
-	}
-}
-
 // ProcessWindow processes a window of packets and logs the observed behavior.
 // It detects anomalies based on the configured thresholds.
 func (config *AnalysisConfiguration) ProcessWindow(
@@ -119,8 +104,8 @@ func (config *AnalysisConfiguration) ProcessWindow(
 	batch []gopacket.Packet,
 	windowStart time.Time,
 ) {
-	filteredBatch, dstIPs := filterIPsBatch(batch, config.filterIPs)
-	_, previousDstIPs := filterIPsBatch(previousBatch, config.filterIPs)
+	filteredBatch, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
+	_, previousDstIPs := filterIPsBatch(previousBatch, &config.context.uninterestingIPs)
 
 	packetRate := calculatePacketRate(&filteredBatch)
 	ipRate := calculateIPRate(
