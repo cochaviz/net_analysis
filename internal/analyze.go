@@ -10,26 +10,54 @@ import (
 )
 
 type AnalysisConfiguration struct {
-	// threshold configuration
 	PacketRateThreshold float64
 	IPRateThreshold     float64
-	Window              time.Duration
 
+	Window      time.Duration
+	savePackets int // number of packets to save, 0 means no packets are saved
+	eventFile   *os.File
+	pcapFile    string // pcapFile is a string because we make a new pcap for each analysis
+	logger      *slog.Logger
+
+	context AnalysisContext
+}
+
+type AnalysisContext struct {
 	// instance configuration
-	srcIP     string
-	logger    *slog.Logger
-	logFile   *os.File
-	filterIPs func(*gopacket.Endpoint) bool
+	srcIP            string
+	c2IP             string
+	sampleID         string   // unique identifier to match behavior to a malware sample
+	uninterestingIPs []string // List of IP addresses that are not interesting for analysis
+}
+
+type BehaviorClass string // Classification of the behavior in a particular window
+
+const (
+	Attack BehaviorClass = "attack"
+	Scan   BehaviorClass = "scanning"
+	Idle   BehaviorClass = ""
+)
+
+type Behavior struct {
+	Classification BehaviorClass
+	Timestamp      time.Time
+	packetRate     float64
+	threshold      float64
+	srcIP          *string
+	dstIPs         *[]string
+	c2IP           *string
 }
 
 func NewAnalysisConfiguration(
 	srcIP string,
+	c2IP string,
+	filterIPs []string,
 	window time.Duration,
 	filePath string,
-	filterIPs func(*gopacket.Endpoint) bool,
 	PacketThreshold float64,
 	IPThreshold float64,
 	level slog.Level,
+	sampleID string,
 ) *AnalysisConfiguration {
 	var logger *slog.Logger
 	var file *os.File
@@ -46,22 +74,26 @@ func NewAnalysisConfiguration(
 	}
 
 	return &AnalysisConfiguration{
-		srcIP:               srcIP,
 		logger:              logger,
-		logFile:             file,
-		filterIPs:           composeEndpointFilter(srcIP, filterIPs),
+		eventFile:           file,
 		PacketRateThreshold: PacketThreshold,
 		IPRateThreshold:     IPThreshold,
 		Window:              window,
+		context: AnalysisContext{
+			srcIP:            srcIP,
+			c2IP:             c2IP,
+			sampleID:         sampleID,
+			uninterestingIPs: filterIPs,
+		},
 	}
 }
 
 func (config *AnalysisConfiguration) Close() error {
-	if config == nil || config.logFile == nil {
+	if config == nil || config.eventFile == nil {
 		return nil
 	}
-	err := config.logFile.Close()
-	config.logFile = nil
+	err := config.eventFile.Close()
+	config.eventFile = nil
 	return err
 }
 
@@ -79,15 +111,6 @@ func composeEndpointFilter(src string, base func(*gopacket.Endpoint) bool) func(
 		return base(ep)
 	}
 }
-
-// TODO: maybe later!
-// type BehaviorLog struct {
-// 	message        string
-// 	packetRate     float64
-// 	threshold      float64
-// 	sourceIP       string
-// 	destinationIPs []string
-// }
 
 // ProcessWindow processes a window of packets and logs the observed behavior.
 // It detects anomalies based on the configured thresholds.
@@ -123,66 +146,83 @@ func (config *AnalysisConfiguration) ProcessWindow(
 		eventTime = time.Now()
 	}
 
-	config.logBehavior(packetRate, ipRate, &dstIPs, eventTime)
+	behavior := config.classifyBehavior(packetRate, ipRate, &dstIPs, eventTime)
+
+	switch behavior.Classification {
+	case Idle:
+		break
+	case Attack:
+		config.logger.Info(
+			"Detected an attack",
+			"type", "event",
+			"timestamp", eventTime,
+			"behavior", behavior,
+		)
+		WritePackets(config.pcapFile, filteredBatch)
+	case Scan:
+		config.logger.Info(
+			"Detected a scan",
+			"type", "event",
+			"timestamp", eventTime,
+			"behavior", behavior,
+		)
+	default:
+		break
+	}
 }
 
-func (config *AnalysisConfiguration) logBehavior(
+func (config *AnalysisConfiguration) classifyBehavior(
 	packetRate float64,
 	newIPRate float64,
 	destinationIPs *[]string,
 	eventTime time.Time,
-) bool {
+) Behavior {
 	// found an anomalous activity
 	if packetRate > config.PacketRateThreshold {
-		config.logger.Debug(
-			"Packet rate exceeded threshold",
-			"type", "event",
-			"timestamp", eventTime,
-			"packetRate", packetRate,
-			"threshold", config.PacketRateThreshold,
-			"sourceIP", config.srcIP,
+		config.logger.Info(
+			"Detected high packet rate",
+			"context", slog.Any("context", config.context),
 		)
 
 		// detected a scan
 		if newIPRate > config.IPRateThreshold {
-			config.logger.Info(
-				"Detected a scan",
-				"type", "alert",
-				"timestamp", eventTime,
-				"ipRate", newIPRate,
-				"threshold", config.IPRateThreshold,
-				"sourceIP", config.srcIP,
-				"destinationIPs", destinationIPs,
-			)
+			return Behavior{
+				Classification: Scan,
+				Timestamp:      eventTime,
+				packetRate:     newIPRate,
+				threshold:      config.IPRateThreshold,
+				srcIP:          &config.context.srcIP,
+				dstIPs:         destinationIPs,
+				c2IP:           &config.context.c2IP,
+			}
 		} else {
 			// detected an attack
-			config.logger.Info(
-				"Attack detected",
-				"type", "alert",
-				"timestamp", eventTime,
-				"packetRate", packetRate,
-				"threshold", config.PacketRateThreshold,
-				"sourceIP", config.srcIP,
-				"destinationIPs", destinationIPs,
-			)
+			return Behavior{
+				Classification: Attack,
+				Timestamp:      eventTime,
+				packetRate:     packetRate,
+				threshold:      config.PacketRateThreshold,
+				srcIP:          &config.context.srcIP,
+				dstIPs:         destinationIPs,
+				c2IP:           &config.context.c2IP,
+			}
 		}
-	} else {
-		config.logger.Debug(
-			"No anomaly within window",
-			"type", "event",
-			"timestamp", eventTime,
-			"packetRate", packetRate,
-			"threshold", config.PacketRateThreshold,
-			"sourceIP", config.srcIP,
-		)
 	}
-	return false
+	return Behavior{
+		Classification: Idle,
+		Timestamp:      eventTime,
+		packetRate:     packetRate,
+		threshold:      config.PacketRateThreshold,
+		srcIP:          &config.context.srcIP,
+		dstIPs:         destinationIPs,
+		c2IP:           &config.context.c2IP,
+	}
 }
 
 // filterIPsBatch filters a batch of packets based on a given IP filter function
 // and the destination IP and returns the filtered batch as well as the
 // destination IPs.
-func filterIPsBatch(batch []gopacket.Packet, filterIPs func(*gopacket.Endpoint) bool) ([]gopacket.Packet, []string) {
+func filterIPsBatch(batch []gopacket.Packet, filterIPs *[]string) ([]gopacket.Packet, []string) {
 	var filteredBatch []gopacket.Packet
 	dstIPs := make([]string, 0, len(batch))
 	seen := make(map[string]struct{}, len(batch))
@@ -192,20 +232,13 @@ func filterIPsBatch(batch []gopacket.Packet, filterIPs func(*gopacket.Endpoint) 
 			continue
 		}
 
-		if packet.NetworkLayer() == nil || packet.TransportLayer() == nil {
-			continue
-		}
-
-		dstIP := packet.NetworkLayer().NetworkFlow().Dst()
-
-		if filterIPs(&dstIP) {
-			filteredBatch = append(filteredBatch, packet)
-			ipStr := dstIP.String()
-			if _, ok := seen[ipStr]; !ok {
-				seen[ipStr] = struct{}{}
-				dstIPs = append(dstIPs, ipStr)
+		if filterIPs != nil {
+			if _, ok := seen[packet.NetworkLayer().NetworkFlow().Dst().String()]; !ok {
+				dstIPs = append(dstIPs, packet.NetworkLayer().NetworkFlow().Dst().String())
+				seen[packet.NetworkLayer().NetworkFlow().Dst().String()] = struct{}{}
 			}
 		}
+
 	}
 
 	return filteredBatch, dstIPs
