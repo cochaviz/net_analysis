@@ -95,22 +95,7 @@ func (config *AnalysisConfiguration) ProcessWindow(
 	packetRate := calculatePacketRate(&filteredBatch, config.Window)
 	ipRate := calculateIPRate(&previousDstIPs, &dstIPs, config.Window)
 
-	eventTime := windowStart
-	if eventTime.IsZero() {
-		if len(filteredBatch) > 0 {
-			if md := filteredBatch[0].Metadata(); md != nil {
-				eventTime = md.Timestamp
-			}
-		}
-	}
-	if eventTime.IsZero() && len(batch) > 0 {
-		if md := batch[0].Metadata(); md != nil {
-			eventTime = md.Timestamp
-		}
-	}
-	if eventTime.IsZero() {
-		eventTime = time.Now()
-	}
+	eventTime := getEventTime(windowStart, &batch, &filteredBatch)
 
 	behavior := config.classifyGlobalBehavior(packetRate, ipRate, &dstIPs, eventTime)
 
@@ -366,4 +351,31 @@ func calculateIPRate(
 	}
 
 	return float64(newCount) / window.Seconds()
+}
+
+// getEventTime returns the timestamp of the start of the window, or of the
+// first packet in the batch or filtered batch, or the current time if no
+// packets are available.
+func getEventTime(
+	windowStart time.Time,
+	batch *[]gopacket.Packet,
+	filteredBatch *[]gopacket.Packet,
+) time.Time {
+	eventTime := windowStart
+
+	if eventTime.IsZero() {
+		if filteredBatch != nil && len(*filteredBatch) > 0 {
+			if md := (*filteredBatch)[0].Metadata(); md != nil {
+				eventTime = md.Timestamp
+			}
+		} else if batch != nil && len(*batch) > 0 {
+			if md := (*batch)[0].Metadata(); md != nil {
+				eventTime = md.Timestamp
+			}
+		} else {
+			eventTime = time.Now()
+		}
+	}
+
+	return eventTime
 }
