@@ -1,3 +1,4 @@
 *.json
 *.jsonl
 .DS_Store
+*.pcap
