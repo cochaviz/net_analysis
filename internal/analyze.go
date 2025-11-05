@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -49,8 +48,6 @@ type batchResult struct {
 	hostPacketCounts  map[string]int
 	globalPacketCount int
 	globalNewIPCount  int
-	totalDuration     time.Duration
-	numBatches        int
 }
 
 type AnalysisContext struct {
@@ -141,24 +138,8 @@ func (config *AnalysisConfiguration) ProcessBatch(
 	batch []gopacket.Packet,
 	windowStart time.Time,
 ) {
-	if config.result.numBatches == 0 {
+	if config.result.windowStart.IsZero() {
 		config.result.windowStart = windowStart
-	}
-	// If we have no last window, we are starting a new window analysis
-	lastPacketTime, err := lastPacketTime(&batch)
-
-	if err != nil {
-		config.logger.Error("Error getting last packet time", "error", err)
-		return
-	}
-	firstTime, firstErr := firstPacketTime(&batch)
-	if firstErr != nil || firstTime.IsZero() {
-		firstTime = windowStart
-	}
-
-	windowSize := lastPacketTime.Sub(firstTime)
-	if windowSize <= 0 {
-		windowSize = config.Window
 	}
 
 	filteredBatch, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
@@ -192,8 +173,6 @@ func (config *AnalysisConfiguration) ProcessBatch(
 	config.result.globalPacketCount += globalPacketCount
 	config.result.hostPacketCounts = mergeHostCounts(config.result.hostPacketCounts, localPacketCounts)
 	config.result.globalNewIPCount += newIPCount
-	config.result.totalDuration += windowSize
-	config.result.numBatches++
 }
 
 func (config *AnalysisConfiguration) captureRecentPackets(batch []gopacket.Packet) {
@@ -272,27 +251,32 @@ func (config *AnalysisConfiguration) snapshotHostPackets(host string) []gopacket
 }
 
 func (config *AnalysisConfiguration) flushResults() {
-	if config.result.numBatches == 0 {
+	if config.result.globalPacketCount == 0 && len(config.result.hostPacketCounts) == 0 {
 		return
 	}
+	if config.result.windowStart.IsZero() {
+		return
+	}
+	windowDuration := config.Window
+	if windowDuration <= 0 {
+		config.logger.Warn(
+			"Unable to normalize rates due to non-positive duration",
+			"window", config.Window,
+		)
+		windowDuration = time.Second
+	}
+	durationSeconds := windowDuration.Seconds()
+	windowEnd := config.result.windowStart.Add(windowDuration)
 
 	config.logger.Debug(
 		"Flushing results",
-		"numBatches", config.result.numBatches,
+		"windowStart", config.result.windowStart,
+		"windowEnd", windowEnd,
+		"windowSeconds", durationSeconds,
 		"globalPacketCount", config.result.globalPacketCount,
 		"hostPacketCounts", config.result.hostPacketCounts,
 		"globalNewIPCount", config.result.globalNewIPCount,
-		"totalDuration", config.result.totalDuration,
 	)
-
-	durationSeconds := config.result.totalDuration.Seconds()
-	if durationSeconds <= 0 {
-		durationSeconds = config.Window.Seconds()
-	}
-	if durationSeconds <= 0 {
-		config.logger.Warn("Unable to normalize rates due to non-positive duration", "window", config.Window)
-		durationSeconds = 1
-	}
 
 	// classify and log behaviors
 	for host, count := range config.result.hostPacketCounts {
@@ -731,35 +715,4 @@ func getEventTime(
 	}
 
 	return eventTime
-}
-
-// lastPacketTime returns the timestamp of the last packet in the batch or
-// filtered batch, or an error if no packets are available.
-func lastPacketTime(batch *[]gopacket.Packet) (time.Time, error) {
-	if batch == nil || len(*batch) == 0 {
-		return time.Time{}, errors.New("No packets in batch")
-	}
-
-	lastPacket := (*batch)[len(*batch)-1]
-
-	if md := lastPacket.Metadata(); md != nil {
-		return md.Timestamp, nil
-	}
-
-	return time.Time{}, errors.New("No metadata available")
-}
-
-// firstPacketTime returns the timestamp of the first packet in the batch or an error
-// if the batch is empty or lacks metadata.
-func firstPacketTime(batch *[]gopacket.Packet) (time.Time, error) {
-	if batch == nil || len(*batch) == 0 {
-		return time.Time{}, errors.New("No packets in batch")
-	}
-
-	firstPacket := (*batch)[0]
-	if md := firstPacket.Metadata(); md != nil {
-		return md.Timestamp, nil
-	}
-
-	return time.Time{}, errors.New("No metadata available")
 }
