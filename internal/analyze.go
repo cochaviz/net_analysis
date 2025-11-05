@@ -121,6 +121,9 @@ func (config *AnalysisConfiguration) ProcessBatch(
 		return
 	}
 	windowSize := lastPacketTime.Sub(windowStart)
+	if windowSize <= 0 {
+		windowSize = config.Window
+	}
 
 	_, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
 	_, previousDstIPs := filterIPsBatch(previousBatch, &config.context.uninterestingIPs)
@@ -176,6 +179,18 @@ func (config *AnalysisConfiguration) logBehavior(
 }
 
 func (config *AnalysisConfiguration) flushResults() {
+	if config.result.numBatches == 0 {
+		return
+	}
+
+	config.logger.Debug(
+		"Flushing results",
+		"numBatches", config.result.numBatches,
+		"globalPacketRate", config.result.globalPacketRate,
+		"hostPacketRate", config.result.hostPacketRate,
+		"globalIPRate", config.result.globalIPRate,
+	)
+
 	// normalize results
 	config.result.globalPacketRate = config.result.globalPacketRate / float64(config.result.numBatches)
 	config.result.hostPacketRate = *normalizeHostRates(&config.result.hostPacketRate, float64(config.result.numBatches))

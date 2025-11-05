@@ -12,8 +12,9 @@ import (
 )
 
 type windowBatch struct {
-	packets []gopacket.Packet
-	start   time.Time
+	packets  []gopacket.Packet
+	start    time.Time
+	complete bool
 }
 
 func CaptureLoop(handle *pcap.Handle, config *AnalysisConfiguration) error {
@@ -53,7 +54,7 @@ func CaptureLoop(handle *pcap.Handle, config *AnalysisConfiguration) error {
 					"Context canceled, flushing partial batch",
 					"count", len(cur),
 				)
-				handoff(process, &cur, windowStart)
+				handoff(process, &cur, windowStart, true)
 			}
 			close(process)
 			<-workerDone
@@ -67,7 +68,7 @@ func CaptureLoop(handle *pcap.Handle, config *AnalysisConfiguration) error {
 						"Packet source closed, flushing partial batch",
 						"count", len(cur),
 					)
-					handoff(process, &cur, windowStart)
+					handoff(process, &cur, windowStart, true)
 				}
 				close(process)
 				<-workerDone
@@ -101,7 +102,7 @@ func CaptureLoop(handle *pcap.Handle, config *AnalysisConfiguration) error {
 					"windowStart", windowStart,
 					"windowEnd", ts,
 				)
-				handoff(process, &cur, windowStart)
+				handoff(process, &cur, windowStart, true)
 				windowStart = ts
 			}
 
@@ -111,17 +112,17 @@ func CaptureLoop(handle *pcap.Handle, config *AnalysisConfiguration) error {
 					"Handing off packet batch at capacity",
 					"count", len(cur),
 				)
-				handoff(process, &cur, windowStart)
+				handoff(process, &cur, windowStart, false)
 			}
 		}
 	}
 }
 
-func handoff(process chan<- windowBatch, cur *[]gopacket.Packet, start time.Time) {
+func handoff(process chan<- windowBatch, cur *[]gopacket.Packet, start time.Time, complete bool) {
 	// Copy packets so the capture loop can safely reuse its buffer.
 	batch := make([]gopacket.Packet, len(*cur))
 	copy(batch, *cur)
-	process <- windowBatch{packets: batch, start: start}
+	process <- windowBatch{packets: batch, start: start, complete: complete}
 	*cur = (*cur)[:0]
 }
 
@@ -136,16 +137,14 @@ func worker(config *AnalysisConfiguration, in <-chan windowBatch, done chan<- st
 			"currentCount", len(batch.packets),
 		)
 		config.ProcessBatch(previous.packets, batch.packets, batch.start)
+		if batch.complete {
+			config.flushResults()
+		}
 		previous = batch
 	}
 
-	if len(previous.packets) > 0 {
-		config.logger.Debug(
-			"Flushing final packet window",
-			"previousCount", len(previous.packets),
-		)
-		config.ProcessBatch(previous.packets, nil, previous.start)
-	}
+	// ensure any partial results are flushed when the capture loop ends abruptly
+	config.flushResults()
 }
 
 func catchSignals(cancel context.CancelFunc) {
