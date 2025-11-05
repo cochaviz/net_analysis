@@ -41,11 +41,15 @@ const (
 type Behavior struct {
 	Classification BehaviorClass
 	Timestamp      time.Time
-	packetRate     float64
-	threshold      float64
-	srcIP          *string
-	dstIPs         *[]string
-	c2IP           *string
+
+	PacketRate      float64
+	PacketThreshold float64
+	IPRate          float64
+	IPRateThreshold float64
+
+	SrcIP  *string
+	DstIPs *[]string
+	C2IP   *string
 }
 
 func NewAnalysisConfiguration(
@@ -140,7 +144,6 @@ func (config *AnalysisConfiguration) ProcessWindow(
 		config.logger.Info(
 			"Detected an attack",
 			"type", "event",
-			"timestamp", eventTime,
 			"behavior", behavior,
 		)
 		WritePackets(config.pcapFile, filteredBatch)
@@ -148,7 +151,6 @@ func (config *AnalysisConfiguration) ProcessWindow(
 		config.logger.Info(
 			"Detected a scan",
 			"type", "event",
-			"timestamp", eventTime,
 			"behavior", behavior,
 		)
 	default:
@@ -173,36 +175,49 @@ func (config *AnalysisConfiguration) classifyBehavior(
 
 		// detected a scan
 		if newIPRate > config.IPRateThreshold {
+			config.logger.Debug(
+				"Detected high new IP rate",
+				"newIPRate", newIPRate,
+				"threshold", config.IPRateThreshold,
+				"eventTime", eventTime,
+			)
+
 			return Behavior{
-				Classification: Scan,
-				Timestamp:      eventTime,
-				packetRate:     newIPRate,
-				threshold:      config.IPRateThreshold,
-				srcIP:          &config.context.srcIP,
-				dstIPs:         destinationIPs,
-				c2IP:           &config.context.c2IP,
+				Classification:  Scan,
+				Timestamp:       eventTime,
+				PacketRate:      newIPRate,
+				PacketThreshold: config.IPRateThreshold,
+				IPRate:          newIPRate,
+				IPRateThreshold: config.IPRateThreshold,
+				SrcIP:           &config.context.srcIP,
+				DstIPs:          destinationIPs,
+				C2IP:            &config.context.c2IP,
 			}
 		} else {
 			// detected an attack
 			return Behavior{
-				Classification: Attack,
-				Timestamp:      eventTime,
-				packetRate:     packetRate,
-				threshold:      config.PacketRateThreshold,
-				srcIP:          &config.context.srcIP,
-				dstIPs:         destinationIPs,
-				c2IP:           &config.context.c2IP,
+				Classification:  Attack,
+				Timestamp:       eventTime,
+				PacketRate:      packetRate,
+				PacketThreshold: config.PacketRateThreshold,
+				IPRate:          newIPRate,
+				IPRateThreshold: config.IPRateThreshold,
+				SrcIP:           &config.context.srcIP,
+				DstIPs:          destinationIPs,
+				C2IP:            &config.context.c2IP,
 			}
 		}
 	}
 	return Behavior{
-		Classification: Idle,
-		Timestamp:      eventTime,
-		packetRate:     packetRate,
-		threshold:      config.PacketRateThreshold,
-		srcIP:          &config.context.srcIP,
-		dstIPs:         destinationIPs,
-		c2IP:           &config.context.c2IP,
+		Classification:  Idle,
+		Timestamp:       eventTime,
+		PacketRate:      packetRate,
+		PacketThreshold: config.PacketRateThreshold,
+		IPRate:          newIPRate,
+		IPRateThreshold: config.IPRateThreshold,
+		SrcIP:           &config.context.srcIP,
+		DstIPs:          destinationIPs,
+		C2IP:            &config.context.c2IP,
 	}
 }
 
