@@ -217,28 +217,70 @@ func (config *AnalysisConfiguration) logBehavior(
 	switch behavior.Classification {
 	case Idle:
 		if config.heartbeat {
-			config.logger.Info(
-				"Idling",
-				"type", "heartbeat",
-				"behavior", behavior,
-			)
+			args := []any{"type", "heartbeat"}
+			args = append(args, behaviorLogArgs(behavior)...)
+			config.logger.Info("Idling", args...)
 		}
 	case Attack:
-		config.logger.Info(
-			"Detected an attack",
-			"type", "event",
-			"behavior", behavior,
-		)
+		args := []any{"type", "event"}
+		args = append(args, behaviorLogArgs(behavior)...)
+		config.logger.Info("Detected an attack", args...)
 		WritePackets(config.pcapFile, packets)
 	case Scan:
-		config.logger.Info(
-			"Detected a scan",
-			"type", "event",
-			"behavior", behavior,
-		)
+		args := []any{"type", "event"}
+		args = append(args, behaviorLogArgs(behavior)...)
+		config.logger.Info("Detected a scan", args...)
 	default:
 		break
 	}
+}
+
+func behaviorLogArgs(behavior *Behavior) []any {
+	if behavior == nil {
+		return nil
+	}
+
+	var args []any
+
+	if behavior.Classification != "" {
+		args = append(args, "classification", behavior.Classification)
+	}
+	if behavior.Scope != "" {
+		args = append(args, "scope", behavior.Scope)
+	}
+	if !behavior.Timestamp.IsZero() {
+		args = append(args, "@timestamp", behavior.Timestamp)
+	}
+
+	if behavior.PacketRate > 0 {
+		args = append(args, "packet_rate", behavior.PacketRate)
+	}
+	if behavior.PacketThreshold > 0 {
+		args = append(args, "packet_threshold", behavior.PacketThreshold)
+	}
+	if behavior.IPRate > 0 {
+		args = append(args, "ip_rate", behavior.IPRate)
+	}
+	if behavior.IPRateThreshold > 0 {
+		args = append(args, "ip_rate_threshold", behavior.IPRateThreshold)
+	}
+	if behavior.SampleID != "" {
+		args = append(args, "sample_id", behavior.SampleID)
+	}
+	if behavior.SrcIP != nil && *behavior.SrcIP != "" {
+		args = append(args, "src_ip", *behavior.SrcIP)
+	}
+	if behavior.C2IP != nil && *behavior.C2IP != "" {
+		args = append(args, "c2_ip", *behavior.C2IP)
+	}
+	if behavior.DstIP != nil && *behavior.DstIP != "" {
+		args = append(args, "dst_ip", *behavior.DstIP)
+	}
+	if behavior.DstIPs != nil && len(*behavior.DstIPs) > 0 {
+		args = append(args, "dst_ips", *behavior.DstIPs)
+	}
+
+	return args
 }
 
 func (config *AnalysisConfiguration) classifyLocalBehavior(
