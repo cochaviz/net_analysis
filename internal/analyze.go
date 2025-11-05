@@ -164,9 +164,11 @@ func (config *AnalysisConfiguration) classifyBehavior(
 ) Behavior {
 	// found an anomalous activity
 	if packetRate > config.PacketRateThreshold {
-		config.logger.Info(
+		config.logger.Debug(
 			"Detected high packet rate",
-			"context", slog.Any("context", config.context),
+			"packetRate", packetRate,
+			"threshold", config.PacketRateThreshold,
+			"eventTime", eventTime,
 		)
 
 		// detected a scan
