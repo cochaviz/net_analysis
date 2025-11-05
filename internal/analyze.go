@@ -4,9 +4,11 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 // == Analysis
@@ -22,16 +24,21 @@ type AnalysisConfiguration struct {
 	PacketRateThreshold float64
 	IPRateThreshold     float64
 	Window              time.Duration
-	savePackets         int    // number of packets to save, 0 means no packets are saved
-	pcapFile            string // pcapFile is a string because we make a new pcap for each analysis
-	heartbeat           bool   // include heartbeat packets in analysis
-	maxHosts            map[string]int
+	maxHosts            map[string]int // maximum number of hosts to analyze
+
+	// extra logging options
+	heartbeat   bool // include heartbeat packets in analysis
+	savePackets int  // number of packets to save, 0 means no packets are saved
+	captureDir  string
+	linkType    layers.LinkType
 
 	// instance references
 	eventFile *os.File
 	logger    *slog.Logger
 
-	result batchResult
+	result    batchResult
+	buffers   map[string]*packetRing
+	ignoredIP map[string]struct{}
 
 	// static context for logging
 	context AnalysisContext
@@ -65,6 +72,7 @@ func NewAnalysisConfiguration(
 	IPThreshold float64,
 	level slog.Level,
 	sampleID string,
+	savePackets int,
 ) *AnalysisConfiguration {
 	var logger *slog.Logger
 	var file *os.File
@@ -87,6 +95,25 @@ func NewAnalysisConfiguration(
 	// source and C2 IPs should be excluded from analysis
 	filterIPs = append(filterIPs, srcIP, c2IP)
 
+	ignored := make(map[string]struct{}, len(filterIPs))
+	for _, ip := range filterIPs {
+		if ip == "" {
+			continue
+		}
+		ignored[ip] = struct{}{}
+	}
+
+	var buffers map[string]*packetRing
+	if savePackets > 0 {
+		buffers = make(map[string]*packetRing)
+	}
+
+	baseDir := "."
+	if filePath != "" {
+		baseDir = filepath.Dir(filePath)
+	}
+	captureDir := filepath.Join(baseDir, "captures")
+
 	return &AnalysisConfiguration{
 		logger:              logger,
 		eventFile:           file,
@@ -94,6 +121,10 @@ func NewAnalysisConfiguration(
 		IPRateThreshold:     IPThreshold,
 		Window:              window,
 		heartbeat:           heartbeat,
+		savePackets:         savePackets,
+		captureDir:          captureDir,
+		buffers:             buffers,
+		ignoredIP:           ignored,
 		context: AnalysisContext{
 			srcIP:            srcIP,
 			c2IP:             c2IP,
@@ -130,9 +161,13 @@ func (config *AnalysisConfiguration) ProcessBatch(
 		windowSize = config.Window
 	}
 
-	_, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
+	filteredBatch, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
 
-	globalPacketCount, localPacketCounts, err := countPacketsByHost(&batch, &config.context.uninterestingIPs, 512)
+	if config.savePackets > 0 {
+		config.captureRecentPackets(batch)
+	}
+
+	globalPacketCount, localPacketCounts, err := countPacketsByHost(&filteredBatch, nil, 512)
 	if err != nil {
 		config.logger.Error("Error counting packet totals", "error", err)
 	}
@@ -159,6 +194,81 @@ func (config *AnalysisConfiguration) ProcessBatch(
 	config.result.globalNewIPCount += newIPCount
 	config.result.totalDuration += windowSize
 	config.result.numBatches++
+}
+
+func (config *AnalysisConfiguration) captureRecentPackets(batch []gopacket.Packet) {
+	if config.savePackets <= 0 || len(batch) == 0 || config.buffers == nil {
+		return
+	}
+
+	for _, packet := range batch {
+		if packet == nil {
+			continue
+		}
+		networkLayer := packet.NetworkLayer()
+		if networkLayer == nil {
+			continue
+		}
+
+		var hosts []string
+		src := networkLayer.NetworkFlow().Src().String()
+		if src != "" {
+			hosts = append(hosts, src)
+		}
+		dst := networkLayer.NetworkFlow().Dst().String()
+		if dst != "" {
+			hosts = append(hosts, dst)
+		}
+
+		if len(hosts) == 0 {
+			continue
+		}
+
+		seen := make(map[string]struct{}, len(hosts))
+		for _, host := range hosts {
+			if _, ok := seen[host]; ok {
+				continue
+			}
+			seen[host] = struct{}{}
+			config.appendPacketForHost(host, packet)
+		}
+	}
+}
+
+func (config *AnalysisConfiguration) appendPacketForHost(host string, packet gopacket.Packet) {
+	if !config.shouldTrackHost(host) {
+		return
+	}
+
+	buf, ok := config.buffers[host]
+	if !ok {
+		buf = newPacketRing(config.savePackets)
+		config.buffers[host] = buf
+	}
+	buf.add(packet)
+}
+
+func (config *AnalysisConfiguration) shouldTrackHost(host string) bool {
+	if host == "" || config.savePackets <= 0 {
+		return false
+	}
+	if config.ignoredIP != nil {
+		if _, skip := config.ignoredIP[host]; skip {
+			return false
+		}
+	}
+	return true
+}
+
+func (config *AnalysisConfiguration) snapshotHostPackets(host string) []gopacket.Packet {
+	if config.buffers == nil {
+		return nil
+	}
+	buf, ok := config.buffers[host]
+	if !ok || buf == nil {
+		return nil
+	}
+	return buf.snapshot()
 }
 
 func (config *AnalysisConfiguration) flushResults() {
@@ -188,7 +298,14 @@ func (config *AnalysisConfiguration) flushResults() {
 	for host, count := range config.result.hostPacketCounts {
 		packetRate := float64(count) / durationSeconds
 		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart)
-		config.logBehavior(localBehavior, nil)
+		var captured []gopacket.Packet
+		if localBehavior != nil &&
+			localBehavior.Classification == Attack &&
+			localBehavior.DstIP != nil &&
+			config.savePackets > 0 {
+			captured = config.snapshotHostPackets(*localBehavior.DstIP)
+		}
+		config.logBehavior(localBehavior, captured)
 	}
 
 	globalPacketRate := float64(config.result.globalPacketCount) / durationSeconds
@@ -222,10 +339,12 @@ func (config *AnalysisConfiguration) logBehavior(
 			config.logger.Info("Idling", args...)
 		}
 	case Attack:
+		if config.savePackets > 0 {
+			config.persistPackets(behavior, packets)
+		}
 		args := []any{"type", "event"}
 		args = append(args, behaviorLogArgs(behavior)...)
 		config.logger.Info("Detected an attack", args...)
-		WritePackets(config.pcapFile, packets)
 	case Scan:
 		args := []any{"type", "event"}
 		args = append(args, behaviorLogArgs(behavior)...)
@@ -283,6 +402,36 @@ func behaviorLogArgs(behavior *Behavior) []any {
 	return args
 }
 
+func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets []gopacket.Packet) {
+	if config.savePackets <= 0 || behavior == nil {
+		return
+	}
+
+	data := packets
+	if len(data) == 0 && behavior.DstIP != nil {
+		data = config.snapshotHostPackets(*behavior.DstIP)
+	}
+	if len(data) == 0 {
+		return
+	}
+
+	path, err := WriteBehaviorCapture(config.captureDir, behavior, data, config.linkType)
+	if err != nil {
+		config.logger.Error(
+			"Failed to write captured packets",
+			"error", err,
+		)
+		return
+	}
+	if path != "" {
+		config.logger.Debug(
+			"Saved attack packet capture",
+			"path", path,
+			"count", len(data),
+		)
+	}
+}
+
 func (config *AnalysisConfiguration) classifyLocalBehavior(
 	packetRate float64,
 	destinationIP string,
@@ -306,6 +455,7 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 			IPRateThreshold: 0,
 			DstIP:           &destinationIP,
 			SrcIP:           &config.context.srcIP,
+			SampleID:        config.context.sampleID,
 		}
 	}
 	return nil
@@ -371,6 +521,42 @@ func (config *AnalysisConfiguration) classifyGlobalBehavior(
 // == Behavior
 
 type BehaviorScope string
+
+type packetRing struct {
+	max   int
+	items []gopacket.Packet
+}
+
+func newPacketRing(max int) *packetRing {
+	if max <= 0 {
+		max = 1
+	}
+	return &packetRing{
+		max:   max,
+		items: make([]gopacket.Packet, 0, max),
+	}
+}
+
+func (r *packetRing) add(packet gopacket.Packet) {
+	if r == nil || r.max <= 0 {
+		return
+	}
+	if len(r.items) < r.max {
+		r.items = append(r.items, packet)
+		return
+	}
+	copy(r.items, r.items[1:])
+	r.items[len(r.items)-1] = packet
+}
+
+func (r *packetRing) snapshot() []gopacket.Packet {
+	if r == nil || len(r.items) == 0 {
+		return nil
+	}
+	out := make([]gopacket.Packet, len(r.items))
+	copy(out, r.items)
+	return out
+}
 
 const (
 	Global BehaviorScope = "global"

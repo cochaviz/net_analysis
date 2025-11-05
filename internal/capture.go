@@ -21,6 +21,8 @@ func CaptureLoop(handle *pcap.Handle, config *AnalysisConfiguration) error {
 	config.logger.Debug("Starting capture loop")
 	defer handle.Close()
 
+	config.linkType = handle.LinkType()
+
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = false // safe to retain packets beyond next read
 	packets := src.Packets()

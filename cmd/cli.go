@@ -19,7 +19,7 @@ import (
 
 const (
 	defaultWindowSizeS        = 30
-	defaultPacketRateThresh   = 1.5
+	defaultPacketRateThresh   = 5.0
 	defaultUniqueIPRateThresh = 10.0
 	defaultLogLevel           = "info"
 )
@@ -34,6 +34,7 @@ var (
 	sampleID              string
 	ignoreDestIPs         []string
 	outputFile            string
+	savePacketsCount      int
 )
 
 func init() {
@@ -91,6 +92,12 @@ func init() {
 		false,
 		"Enable heartbeat logging (disabled by default).",
 	)
+	RootCmd.Flags().IntVar(
+		&savePacketsCount,
+		"save-packets",
+		0,
+		"Number of most recent packets per host to retain for capture artifacts when an attack is detected.",
+	)
 }
 
 var RootCmd = &cobra.Command{
@@ -143,6 +150,7 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		uniqueIPRateThreshold,
 		level,
 		sampleID,
+		savePacketsCount,
 	)
 	defer func() {
 		if err := config.Close(); err != nil {
