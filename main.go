@@ -1,7 +1,7 @@
 package main
 
 import (
-	"cochaviz/gomon/cmd"
+	"github.com/cochaviz/gomon/cmd"
 
 	"github.com/spf13/cobra"
 )

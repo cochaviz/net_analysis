@@ -1,4 +1,4 @@
-module cochaviz/gomon
+module github.com/cochaviz/gomon
 
 go 1.24.4
 

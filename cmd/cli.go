@@ -14,7 +14,7 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
 
-	"cochaviz/gomon/internal"
+	"github.com/cochaviz/gomon/internal"
 )
 
 const asciiBanner = `
