@@ -145,37 +145,23 @@ func (config *AnalysisConfiguration) ProcessBatch(
 		config.result.windowStart = windowStart
 	}
 
-	filteredBatch, dstIPs := filterIPsBatch(batch, &config.context.uninterestingIPs)
-
 	if config.savePackets > 0 {
 		config.captureRecentPackets(batch)
 	}
 
-	globalPacketCount, localPacketCounts, err := countPacketsByHost(&filteredBatch, nil, 512)
+	globalPacketCount, localPacketCounts, err := countPacketsByHost(&batch, &config.context.uninterestingIPs, 512)
 	if err != nil {
 		config.logger.Error("Error counting packet totals", "error", err)
 	}
 
-	newIPCount := 0
-	if len(dstIPs) > 0 {
-		for _, ip := range dstIPs {
-			if ip == "" {
-				continue
-			}
-			if config.result.hostPacketCounts == nil {
-				newIPCount++
-				continue
-			}
-			if _, seen := config.result.hostPacketCounts[ip]; !seen {
-				newIPCount++
-			}
-		}
-	}
-
 	// Save intermediate results; normalization happens when the window flushes.
 	config.result.globalPacketCount += globalPacketCount
-	config.result.hostPacketCounts = mergeHostCounts(config.result.hostPacketCounts, localPacketCounts)
-	config.result.globalNewIPCount += newIPCount
+	var newHostCount int
+	config.result.hostPacketCounts, newHostCount = mergeHostCounts(
+		config.result.hostPacketCounts,
+		localPacketCounts,
+	)
+	config.result.globalNewIPCount += newHostCount
 }
 
 func (config *AnalysisConfiguration) captureRecentPackets(batch []gopacket.Packet) {
@@ -588,63 +574,28 @@ func (config *AnalysisConfiguration) Close() error {
 
 // == Helper Functions
 
-// filterIPsBatch filters a batch of packets based on a given IP filter function
-// and the destination IP and returns the filtered batch as well as the
-// destination IPs.
-func filterIPsBatch(batch []gopacket.Packet, filterIPs *[]string) ([]gopacket.Packet, []string) {
-	filteredBatch := make([]gopacket.Packet, 0, len(batch))
-	dstIPs := make([]string, 0, len(batch))
-	seen := make(map[string]struct{}, len(batch))
-
-	var ignore map[string]struct{}
-	if filterIPs != nil && len(*filterIPs) > 0 {
-		ignore = make(map[string]struct{}, len(*filterIPs))
-		for _, ip := range *filterIPs {
-			if ip == "" {
-				continue
-			}
-			ignore[ip] = struct{}{}
-		}
-	}
-
-	for _, packet := range batch {
-		if packet == nil {
-			continue
-		}
-		networkLayer := packet.NetworkLayer()
-		if networkLayer == nil {
-			continue
-		}
-		dst := networkLayer.NetworkFlow().Dst().String()
-
-		if _, skip := ignore[dst]; skip {
-			continue
-		}
-
-		filteredBatch = append(filteredBatch, packet)
-		if _, ok := seen[dst]; !ok {
-			dstIPs = append(dstIPs, dst)
-			seen[dst] = struct{}{}
-		}
-	}
-
-	return filteredBatch, dstIPs
-}
-
-func mergeHostCounts(acc map[string]int, batch map[string]int) map[string]int {
+func mergeHostCounts(acc map[string]int, batch map[string]int) (map[string]int, int) {
 	if len(batch) == 0 {
-		return acc
+		return acc, 0
 	}
 
 	if acc == nil {
 		acc = make(map[string]int, len(batch))
 	}
 
+	newHosts := 0
+
 	for host, count := range batch {
+		if count == 0 {
+			continue
+		}
+		if _, exists := acc[host]; !exists {
+			newHosts++
+		}
 		acc[host] += count
 	}
 
-	return acc
+	return acc, newHosts
 }
 
 // countPacketsByHost tallies packets overall and per destination host.
