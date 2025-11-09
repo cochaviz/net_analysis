@@ -40,9 +40,21 @@ type AnalysisConfiguration struct {
 	result    batchResult
 	buffers   map[string]*packetRing
 	ignoredIP map[string]struct{}
+	summary   AnalysisSummary
 
 	// static context for logging
 	context AnalysisContext
+}
+
+type AnalysisSummary struct {
+	AttackEvents  int
+	ScanEvents    int
+	IdleEvents    int
+	SavedCaptures int
+}
+
+func (s AnalysisSummary) TotalAlerts() int {
+	return s.AttackEvents + s.ScanEvents
 }
 
 type batchResult struct {
@@ -315,11 +327,18 @@ func (config *AnalysisConfiguration) logBehavior(
 		if !config.showIdle {
 			return
 		}
+		config.summary.IdleEvents++
 	case Attack:
+		var captured bool
 		if config.savePackets > 0 {
-			config.persistPackets(behavior, packets)
+			captured = config.persistPackets(behavior, packets)
+			if captured {
+				config.summary.SavedCaptures++
+			}
 		}
+		config.summary.AttackEvents++
 	case Scan:
+		config.summary.ScanEvents++
 	default:
 		return
 	}
@@ -339,9 +358,9 @@ func (config *AnalysisConfiguration) logBehavior(
 	}
 }
 
-func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets []gopacket.Packet) {
+func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets []gopacket.Packet) bool {
 	if config.savePackets <= 0 || behavior == nil {
-		return
+		return false
 	}
 
 	data := packets
@@ -349,7 +368,7 @@ func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets 
 		data = config.snapshotHostPackets(*behavior.DstIP)
 	}
 	if len(data) == 0 {
-		return
+		return false
 	}
 
 	path, err := WriteBehaviorCapture(config.captureDir, behavior, data, config.linkType)
@@ -358,7 +377,7 @@ func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets 
 			"Failed to write captured packets",
 			"error", err,
 		)
-		return
+		return false
 	}
 	if path != "" {
 		config.logger.Info(
@@ -366,7 +385,9 @@ func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets 
 			"path", path,
 			"count", len(data),
 		)
+		return true
 	}
+	return false
 }
 
 func (config *AnalysisConfiguration) classifyLocalBehavior(
@@ -534,6 +555,13 @@ func (config *AnalysisConfiguration) Close() error {
 	err := config.eventFile.Close()
 	config.eventFile = nil
 	return err
+}
+
+func (config *AnalysisConfiguration) Summary() AnalysisSummary {
+	if config == nil {
+		return AnalysisSummary{}
+	}
+	return config.summary
 }
 
 // == Helper Functions

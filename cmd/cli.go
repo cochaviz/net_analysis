@@ -176,11 +176,20 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("capture loop failed: %w", err)
 	}
 
+	summary := config.Summary()
+
 	if eveLogPath != "" {
 		cmd.Printf("Analysis complete. Eve log: %s\n", filepath.Clean(eveLogPath))
 	} else {
-		cmd.Printf("Analysis complete.")
+		cmd.Println("Analysis complete. Eve log: stdout")
 	}
+	cmd.Printf(
+		"Summary: %d attack alert(s), %d scan alert(s), %d idle window(s), %d capture(s) saved\n",
+		summary.AttackEvents,
+		summary.ScanEvents,
+		summary.IdleEvents,
+		summary.SavedCaptures,
+	)
 	return nil
 }
 
