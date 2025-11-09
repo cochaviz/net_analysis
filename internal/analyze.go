@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -32,8 +33,9 @@ type AnalysisConfiguration struct {
 	linkType    layers.LinkType
 
 	// instance references
-	eventFile *os.File
-	logger    *slog.Logger
+	eventFile   *os.File
+	logger      *slog.Logger
+	eventLogger *EveLogger
 
 	result    batchResult
 	buffers   map[string]*packetRing
@@ -71,19 +73,22 @@ func NewAnalysisConfiguration(
 	sampleID string,
 	savePackets int,
 ) *AnalysisConfiguration {
-	var logger *slog.Logger
-	var file *os.File
+	var (
+		file        *os.File
+		eventWriter io.Writer = os.Stdout
+	)
 
-	if filePath == "" {
-		logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-	} else {
+	if filePath != "" {
 		var err error
 		file, err = os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			panic(err)
 		}
-		logger = slog.New(slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level}))
+		eventWriter = file
 	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	eventLogger := NewEveLogger(eventWriter)
 
 	if window <= 0 {
 		panic("window duration must be greater than zero")
@@ -113,6 +118,7 @@ func NewAnalysisConfiguration(
 
 	return &AnalysisConfiguration{
 		logger:              logger,
+		eventLogger:         eventLogger,
 		eventFile:           file,
 		PacketRateThreshold: PacketThreshold,
 		IPRateThreshold:     IPThreshold,
@@ -306,73 +312,31 @@ func (config *AnalysisConfiguration) logBehavior(
 
 	switch behavior.Classification {
 	case Idle:
-		if config.heartbeat {
-			args := []any{"type", "heartbeat"}
-			args = append(args, behaviorLogArgs(behavior)...)
-			config.logger.Info("Idling", args...)
+		if !config.heartbeat {
+			return
 		}
 	case Attack:
 		if config.savePackets > 0 {
 			config.persistPackets(behavior, packets)
 		}
-		args := []any{"type", "event"}
-		args = append(args, behaviorLogArgs(behavior)...)
-		config.logger.Info("Detected an attack", args...)
 	case Scan:
-		args := []any{"type", "event"}
-		args = append(args, behaviorLogArgs(behavior)...)
-		config.logger.Info("Detected a scan", args...)
 	default:
-		break
-	}
-}
-
-func behaviorLogArgs(behavior *Behavior) []any {
-	if behavior == nil {
-		return nil
+		return
 	}
 
-	var args []any
-
-	if behavior.Classification != "" {
-		args = append(args, "classification", behavior.Classification)
-	}
-	if behavior.Scope != "" {
-		args = append(args, "scope", behavior.Scope)
-	}
-	if !behavior.Timestamp.IsZero() {
-		args = append(args, "@timestamp", behavior.Timestamp)
+	if config.eventLogger == nil {
+		return
 	}
 
-	if behavior.PacketRate > 0 {
-		args = append(args, "packet_rate", behavior.PacketRate)
+	if err := config.eventLogger.LogBehavior(behavior); err != nil {
+		config.logger.Error("Failed to write eve event", "error", err)
+	} else {
+		config.logger.Debug(
+			"Emitted eve event",
+			"classification", behavior.Classification,
+			"scope", behavior.Scope,
+		)
 	}
-	if behavior.PacketThreshold > 0 {
-		args = append(args, "packet_threshold", behavior.PacketThreshold)
-	}
-	if behavior.IPRate > 0 {
-		args = append(args, "ip_rate", behavior.IPRate)
-	}
-	if behavior.IPRateThreshold > 0 {
-		args = append(args, "ip_rate_threshold", behavior.IPRateThreshold)
-	}
-	if behavior.SampleID != "" {
-		args = append(args, "sample_id", behavior.SampleID)
-	}
-	if behavior.SrcIP != nil && *behavior.SrcIP != "" {
-		args = append(args, "src_ip", *behavior.SrcIP)
-	}
-	if behavior.C2IP != nil && *behavior.C2IP != "" {
-		args = append(args, "c2_ip", *behavior.C2IP)
-	}
-	if behavior.DstIP != nil && *behavior.DstIP != "" {
-		args = append(args, "dst_ip", *behavior.DstIP)
-	}
-	if behavior.DstIPs != nil && len(*behavior.DstIPs) > 0 {
-		args = append(args, "dst_ips", *behavior.DstIPs)
-	}
-
-	return args
 }
 
 func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets []gopacket.Packet) {
@@ -397,7 +361,7 @@ func (config *AnalysisConfiguration) persistPackets(behavior *Behavior, packets 
 		return
 	}
 	if path != "" {
-		config.logger.Debug(
+		config.logger.Info(
 			"Saved attack packet capture",
 			"path", path,
 			"count", len(data),
