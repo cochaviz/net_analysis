@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,11 +37,11 @@ var (
 	uniqueIPRateThreshold = defaultUniqueIPRateThresh
 	logLevelStr           = defaultLogLevel
 	windowSizeSeconds     = defaultWindowSizeS
-	heartbeat             bool
+	showIdle              bool
 	c2IP                  string
 	sampleID              string
 	ignoreDestIPs         []string
-	outputFile            string
+	eveLogPath            string
 	savePacketsCount      int
 )
 
@@ -90,16 +89,16 @@ func init() {
 		"Destination IP addresses to skip when computing metrics (repeatable).",
 	)
 	RootCmd.Flags().StringVar(
-		&outputFile,
-		"output",
+		&eveLogPath,
+		"eve-log-path",
 		"",
-		"Optional file path for JSON log output.",
+		"Optional file path for Eve JSON output (stdout if omitted).",
 	)
 	RootCmd.Flags().BoolVar(
-		&heartbeat,
-		"heartbeat",
+		&showIdle,
+		"show-idle",
 		false,
-		"Enable heartbeat logging (disabled by default).",
+		"Emit idle window events (disabled by default).",
 	)
 	RootCmd.Flags().IntVar(
 		&savePacketsCount,
@@ -128,8 +127,10 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 	input := args[0]
 	srcIP := args[1]
 
-	if err := ensureOutputDir(path.Dir(outputFile)); err != nil {
-		return err
+	if eveLogPath != "" {
+		if err := ensureOutputDir(filepath.Dir(eveLogPath)); err != nil {
+			return err
+		}
 	}
 
 	if packetRateThreshold <= 0 {
@@ -156,9 +157,9 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		srcIP,
 		c2IP,
 		ignoreDestIPs,
-		heartbeat,
+		showIdle,
 		time.Duration(windowSizeSeconds)*time.Second,
-		outputFile,
+		eveLogPath,
 		packetRateThreshold,
 		uniqueIPRateThreshold,
 		level,
@@ -175,8 +176,8 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("capture loop failed: %w", err)
 	}
 
-	if outputFile != "" {
-		cmd.Printf("Analysis complete. Output file: %s\n", filepath.Clean(outputFile))
+	if eveLogPath != "" {
+		cmd.Printf("Analysis complete. Eve log: %s\n", filepath.Clean(eveLogPath))
 	} else {
 		cmd.Printf("Analysis complete.")
 	}
@@ -219,26 +220,26 @@ func resolveHandle(input string) (*pcap.Handle, error) {
 	return HandleFromInterface(input)
 }
 
-func ensureOutputDir(path string) error {
-	if path == "" {
+func ensureOutputDir(dirPath string) error {
+	if dirPath == "" {
 		return nil
 	}
 
-	info, err := os.Stat(path)
+	info, err := os.Stat(dirPath)
 	if err == nil {
 		if !info.IsDir() {
-			return fmt.Errorf("output path %q is not a directory", path)
+			return fmt.Errorf("output path %q is not a directory", dirPath)
 		}
 		return nil
 	}
 
 	if errors.Is(err, fs.ErrNotExist) {
 		// Create the directory tree so subsequent steps can use it.
-		if mkErr := os.MkdirAll(path, 0o755); mkErr != nil {
-			return fmt.Errorf("unable to create output directory %q: %w", path, mkErr)
+		if mkErr := os.MkdirAll(dirPath, 0o755); mkErr != nil {
+			return fmt.Errorf("unable to create output directory %q: %w", dirPath, mkErr)
 		}
 		return nil
 	}
 
-	return fmt.Errorf("unable to access output directory %q: %w", path, err)
+	return fmt.Errorf("unable to access output directory %q: %w", dirPath, err)
 }

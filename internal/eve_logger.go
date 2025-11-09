@@ -53,7 +53,7 @@ type EveFlowStats struct {
 // EveDetails keeps gomon specific metadata grouped under a dedicated object.
 type EveDetails struct {
 	Scope           BehaviorScope `json:"scope,omitempty"`
-	C2IP            *string       `json:"c2_ip,omitempty"` // easier handling of nil values
+	C2IP            *string       `json:"c2_ip,omitempty"` // easier handling of nil values from behavior
 	PacketRate      float64       `json:"packet_rate,omitempty"`
 	PacketThreshold float64       `json:"packet_threshold,omitempty"`
 	IPRate          float64       `json:"ip_rate,omitempty"`

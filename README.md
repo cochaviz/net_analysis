@@ -22,12 +22,13 @@ go run . <input> <src_ip> [flags]
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--output` | JSON log file path (stdout if omitted). | _None_ |
+| `--eve-log-path` | Eve JSON log file path (stdout if omitted). | _None_ |
 | `--window` | Analysis window size in seconds. | `30` |
 | `--packet-threshold` | Packets per window that trigger an alert. | `5` |
 | `--ip-threshold` | Unique destination IPs per window that trigger a scan alert. | `10` |
 | `--log-level` | Logging verbosity (`debug`, `info`, `warn`, `error`). | `info` |
 | `--save-packets` | Number of most recent packets per host to persist when an alert fires. | `0` |
+| `--show-idle` | Emit idle window records instead of alerts only. | `false` |
 
 ## Alert Semantics
 

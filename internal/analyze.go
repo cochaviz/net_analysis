@@ -27,7 +27,7 @@ type AnalysisConfiguration struct {
 	maxHosts            map[string]int // maximum number of hosts to analyze
 
 	// extra logging options
-	heartbeat   bool // include heartbeat packets in analysis
+	showIdle    bool // emit idle windows when requested
 	savePackets int  // number of packets to save, 0 means no packets are saved
 	captureDir  string
 	linkType    layers.LinkType
@@ -64,7 +64,7 @@ func NewAnalysisConfiguration(
 	srcIP string,
 	c2IP string,
 	filterIPs []string,
-	heartbeat bool,
+	showIdle bool,
 	window time.Duration,
 	filePath string,
 	PacketThreshold float64,
@@ -123,7 +123,7 @@ func NewAnalysisConfiguration(
 		PacketRateThreshold: PacketThreshold,
 		IPRateThreshold:     IPThreshold,
 		Window:              window,
-		heartbeat:           heartbeat,
+		showIdle:            showIdle,
 		savePackets:         savePackets,
 		captureDir:          captureDir,
 		buffers:             buffers,
@@ -312,7 +312,7 @@ func (config *AnalysisConfiguration) logBehavior(
 
 	switch behavior.Classification {
 	case Idle:
-		if !config.heartbeat {
+		if !config.showIdle {
 			return
 		}
 	case Attack:
