@@ -30,6 +30,7 @@ gomon <input> <src_ip> [flags]
 | `--log-level` | Logging verbosity (`debug`, `info`, `warn`, `error`). | `info` |
 | `--save-packets` | Number of most recent packets per host to persist when an alert fires. | `0` |
 | `--show-idle` | Emit idle window records instead of alerts only. | `false` |
+| `--capture-dir` | Directory for packet captures created when alerts fire. Defaults to `./captures`. | `./captures` |
 
 ## Alert Semantics
 

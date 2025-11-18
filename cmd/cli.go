@@ -37,6 +37,7 @@ var (
 	uniqueIPRateThreshold = defaultUniqueIPRateThresh
 	logLevelStr           = defaultLogLevel
 	windowSizeSeconds     = defaultWindowSizeS
+	captureDirPath        string
 	showIdle              bool
 	c2IP                  string
 	sampleID              string
@@ -100,6 +101,12 @@ func init() {
 		false,
 		"Emit idle window events (disabled by default).",
 	)
+	RootCmd.Flags().StringVar(
+		&captureDirPath,
+		"capture-dir",
+		"",
+		"Directory for packet capture artifacts (default: ./captures).",
+	)
 	RootCmd.Flags().IntVar(
 		&savePacketsCount,
 		"save-packets",
@@ -142,6 +149,11 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 	if windowSizeSeconds <= 0 {
 		return fmt.Errorf("window must be greater than 0, received %d", windowSizeSeconds)
 	}
+	if captureDirPath == "" {
+		captureDirPath = filepath.Join(".", "captures")
+	} else if err := ensureOutputDir(captureDirPath); err != nil {
+		return err
+	}
 
 	level, err := parseLogLevel(logLevelStr)
 	if err != nil {
@@ -165,6 +177,7 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		level,
 		sampleID,
 		savePacketsCount,
+		captureDirPath,
 	)
 	defer func() {
 		if err := config.Close(); err != nil {

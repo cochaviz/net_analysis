@@ -84,6 +84,7 @@ func NewAnalysisConfiguration(
 	level slog.Level,
 	sampleID string,
 	savePackets int,
+	captureDir string,
 ) *AnalysisConfiguration {
 	var (
 		file        *os.File
@@ -122,11 +123,10 @@ func NewAnalysisConfiguration(
 		buffers = make(map[string]*packetRing)
 	}
 
-	baseDir := "."
-	if filePath != "" {
-		baseDir = filepath.Dir(filePath)
+	if captureDir == "" {
+		captureDir = filepath.Join(".", "captures")
 	}
-	captureDir := filepath.Join(baseDir, "captures")
+	captureDir = filepath.Clean(captureDir)
 
 	return &AnalysisConfiguration{
 		logger:              logger,
