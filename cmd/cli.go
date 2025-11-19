@@ -178,6 +178,7 @@ func executeAnalysis(cmd *cobra.Command, args []string) error {
 		sampleID,
 		savePacketsCount,
 		captureDirPath,
+		nil,
 	)
 	defer func() {
 		if err := config.Close(); err != nil {

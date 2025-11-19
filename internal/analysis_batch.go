@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -12,12 +13,6 @@ import (
 )
 
 // == Analysis
-
-type MaxHostsReached struct{}
-
-func (e MaxHostsReached) Error() string {
-	return "maximum number of hosts reached"
-}
 
 type AnalysisConfiguration struct {
 	// configuration
@@ -37,10 +32,11 @@ type AnalysisConfiguration struct {
 	logger      *slog.Logger
 	eventLogger *EveLogger
 
-	result    batchResult
-	buffers   map[string]*packetRing
-	ignoredIP map[string]struct{}
-	summary   AnalysisSummary
+	result          batchResult
+	buffers         map[string]*packetRing
+	ignoredIP       map[string]struct{}
+	summary         AnalysisSummary
+	captureBehavior func(*AnalysisConfiguration, *Behavior) (bool, error)
 
 	// static context for logging
 	context AnalysisContext
@@ -85,6 +81,7 @@ func NewAnalysisConfiguration(
 	sampleID string,
 	savePackets int,
 	captureDir string,
+	captureBehavior func(*AnalysisConfiguration, *Behavior) (bool, error),
 ) *AnalysisConfiguration {
 	var (
 		file        *os.File
@@ -128,6 +125,10 @@ func NewAnalysisConfiguration(
 	}
 	captureDir = filepath.Clean(captureDir)
 
+	if captureBehavior == nil {
+		captureBehavior = defaultCaptureBehavior
+	}
+
 	return &AnalysisConfiguration{
 		logger:              logger,
 		eventLogger:         eventLogger,
@@ -146,7 +147,42 @@ func NewAnalysisConfiguration(
 			sampleID:         sampleID,
 			uninterestingIPs: filterIPs,
 		},
+		captureBehavior: captureBehavior,
 	}
+}
+
+type BehaviorScope string
+
+const (
+	Global BehaviorScope = "global"
+	Local  BehaviorScope = "local"
+)
+
+type BehaviorClass string // Classification of the behavior in a particular window
+
+const (
+	Attack BehaviorClass = "attack"
+	Scan   BehaviorClass = "scanning"
+	Idle   BehaviorClass = ""
+)
+
+type Behavior struct {
+	Classification BehaviorClass `json:"classification"`
+	Scope          BehaviorScope `json:"scope"`      // Indicates the scope of the behavior (global/local)
+	Timestamp      time.Time     `json:"@timestamp"` // @timestamp to comply with Elastic
+
+	PacketRate      float64 `json:"packet_rate"`
+	PacketThreshold float64 `json:"packet_threshold"`
+	IPRate          float64 `json:"ip_rate"`
+	IPRateThreshold float64 `json:"ip_rate_threshold"`
+
+	SampleID string  `json:"sample_id"`
+	SrcIP    *string `json:"src_ip"`
+	C2IP     *string `json:"c2_ip"`
+
+	// Destination IP/s depending on the scope
+	DstIPs *[]string `json:"dst_ips"`
+	DstIP  *string   `json:"dst_ip"`
 }
 
 // ProcessBatch processes a (subset) of a window of packets and saves
@@ -285,20 +321,7 @@ func (config *AnalysisConfiguration) flushResults() {
 		"globalNewIPCount", config.result.globalNewIPCount,
 	)
 
-	// classify and log behaviors
-	for host, count := range config.result.hostPacketCounts {
-		packetRate := float64(count) / durationSeconds
-		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart)
-		var captured []gopacket.Packet
-		if localBehavior != nil &&
-			localBehavior.Classification == Attack &&
-			localBehavior.DstIP != nil &&
-			config.savePackets > 0 {
-			captured = config.snapshotHostPackets(*localBehavior.DstIP)
-		}
-		config.logBehavior(localBehavior, captured)
-	}
-
+	// first classify global behavior since it can be used by the local behavior
 	globalPacketRate := float64(config.result.globalPacketCount) / durationSeconds
 	globalIPRate := float64(config.result.globalNewIPCount) / durationSeconds
 
@@ -310,7 +333,20 @@ func (config *AnalysisConfiguration) flushResults() {
 	)
 	config.logBehavior(globalBehavior, nil)
 
-	// clear results after flush
+	// then classify local behavior
+	for host, count := range config.result.hostPacketCounts {
+		packetRate := float64(count) / durationSeconds
+		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart)
+		var captured []gopacket.Packet
+
+		if capture, err := config.captureBehavior(config, localBehavior); err != nil {
+			config.logger.Error("Failed to capture packets", "error", err)
+		} else if capture {
+			captured = config.snapshotHostPackets(*localBehavior.DstIP)
+		}
+		config.logBehavior(localBehavior, captured)
+	}
+
 	config.result = batchResult{}
 }
 
@@ -476,78 +512,6 @@ func (config *AnalysisConfiguration) classifyGlobalBehavior(
 	}
 }
 
-// == Behavior
-
-type BehaviorScope string
-
-type packetRing struct {
-	max   int
-	items []gopacket.Packet
-}
-
-func newPacketRing(max int) *packetRing {
-	if max <= 0 {
-		max = 1
-	}
-	return &packetRing{
-		max:   max,
-		items: make([]gopacket.Packet, 0, max),
-	}
-}
-
-func (r *packetRing) add(packet gopacket.Packet) {
-	if r == nil || r.max <= 0 {
-		return
-	}
-	if len(r.items) < r.max {
-		r.items = append(r.items, packet)
-		return
-	}
-	copy(r.items, r.items[1:])
-	r.items[len(r.items)-1] = packet
-}
-
-func (r *packetRing) snapshot() []gopacket.Packet {
-	if r == nil || len(r.items) == 0 {
-		return nil
-	}
-	out := make([]gopacket.Packet, len(r.items))
-	copy(out, r.items)
-	return out
-}
-
-const (
-	Global BehaviorScope = "global"
-	Local  BehaviorScope = "local"
-)
-
-type BehaviorClass string // Classification of the behavior in a particular window
-
-const (
-	Attack BehaviorClass = "attack"
-	Scan   BehaviorClass = "scanning"
-	Idle   BehaviorClass = ""
-)
-
-type Behavior struct {
-	Classification BehaviorClass `json:"classification"`
-	Scope          BehaviorScope `json:"scope"`      // Indicates the scope of the behavior (global/local)
-	Timestamp      time.Time     `json:"@timestamp"` // @timestamp to comply with Elastic
-
-	PacketRate      float64 `json:"packet_rate"`
-	PacketThreshold float64 `json:"packet_threshold"`
-	IPRate          float64 `json:"ip_rate"`
-	IPRateThreshold float64 `json:"ip_rate_threshold"`
-
-	SampleID string  `json:"sample_id"`
-	SrcIP    *string `json:"src_ip"`
-	C2IP     *string `json:"c2_ip"`
-
-	// Destination IP/s depending on the scope
-	DstIPs *[]string `json:"dst_ips"`
-	DstIP  *string   `json:"dst_ip"`
-}
-
 func (config *AnalysisConfiguration) Close() error {
 	if config == nil || config.eventFile == nil {
 		return nil
@@ -564,101 +528,14 @@ func (config *AnalysisConfiguration) Summary() AnalysisSummary {
 	return config.summary
 }
 
-// == Helper Functions
-
-func mergeHostCounts(acc map[string]int, batch map[string]int) (map[string]int, int) {
-	if len(batch) == 0 {
-		return acc, 0
+func defaultCaptureBehavior(config *AnalysisConfiguration, behavior *Behavior) (bool, error) {
+	if config == nil {
+		return false, errors.New("config is nil")
 	}
-
-	if acc == nil {
-		acc = make(map[string]int, len(batch))
+	if behavior == nil {
+		return false, nil
 	}
-
-	newHosts := 0
-
-	for host, count := range batch {
-		if count == 0 {
-			continue
-		}
-		if _, exists := acc[host]; !exists {
-			newHosts++
-		}
-		acc[host] += count
-	}
-
-	return acc, newHosts
-}
-
-// countPacketsByHost tallies packets overall and per destination host.
-func countPacketsByHost(
-	pkts *[]gopacket.Packet,
-	excludeIPs *[]string,
-	maxHosts int,
-) (int, map[string]int, error) {
-	if pkts == nil || len(*pkts) == 0 {
-		return 0, nil, nil
-	}
-
-	hostCounts := make(map[string]int, maxHosts)
-	total := 0
-
-	var exclude map[string]struct{}
-	if excludeIPs != nil && len(*excludeIPs) > 0 {
-		exclude = make(map[string]struct{}, len(*excludeIPs))
-		for _, ip := range *excludeIPs {
-			if ip == "" {
-				continue
-			}
-			exclude[ip] = struct{}{}
-		}
-	}
-
-	for _, packet := range *pkts {
-		if packet == nil {
-			continue
-		}
-		networkLayer := packet.NetworkLayer()
-		if networkLayer == nil {
-			continue
-		}
-
-		dst := networkLayer.NetworkFlow().Dst().String()
-
-		if _, skip := exclude[dst]; skip {
-			continue
-		}
-
-		total++
-
-		if len(hostCounts) < maxHosts || hostCounts[dst] > 0 {
-			hostCounts[dst]++
-		} else {
-			return total, hostCounts, MaxHostsReached{}
-		}
-	}
-
-	return total, hostCounts, nil
-}
-
-// getEventTime returns the timestamp of the start of the window, or of the
-// first packet in the batch or filtered batch, or the current time if no
-// packets are available.
-func getEventTime(
-	windowStart time.Time,
-	batch *[]gopacket.Packet,
-) time.Time {
-	eventTime := windowStart
-
-	if eventTime.IsZero() {
-		if batch != nil && len(*batch) > 0 {
-			if md := (*batch)[0].Metadata(); md != nil {
-				eventTime = md.Timestamp
-			}
-		} else {
-			eventTime = time.Now()
-		}
-	}
-
-	return eventTime
+	return (behavior.Classification == Attack &&
+		behavior.DstIP != nil &&
+		config.savePackets > 0), nil
 }
