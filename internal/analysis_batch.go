@@ -161,9 +161,13 @@ const (
 type BehaviorClass string // Classification of the behavior in a particular window
 
 const (
-	Attack BehaviorClass = "attack"
-	Scan   BehaviorClass = "scanning"
-	Idle   BehaviorClass = ""
+	// local
+	Attack             BehaviorClass = "attack"              // any attacking behavior
+	OutboundConnection BehaviorClass = "outbound_connection" // normal connectivity behavior
+
+	// global
+	Scan BehaviorClass = "scanning" // any scanning behavior
+	Idle BehaviorClass = "idle"     // absence of activity
 )
 
 type Behavior struct {
@@ -438,7 +442,8 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 		"destinationIP", destinationIP,
 	)
 
-	if packetRate > config.PacketRateThreshold {
+	// attacks can only occur if a C2 IP is specified
+	if config.context.c2IP != "" && packetRate > config.PacketRateThreshold {
 		return &Behavior{
 			Classification:  Attack,
 			Scope:           Local,
@@ -452,7 +457,18 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 			SampleID:        config.context.sampleID,
 		}
 	}
-	return nil
+	return &Behavior{
+		Classification:  OutboundConnection,
+		Scope:           Local,
+		Timestamp:       eventTime,
+		PacketRate:      packetRate,
+		PacketThreshold: config.PacketRateThreshold,
+		IPRate:          0,
+		IPRateThreshold: 0,
+		DstIP:           &destinationIP,
+		SrcIP:           &config.context.srcIP,
+		SampleID:        config.context.sampleID,
+	}
 }
 
 func (config *AnalysisConfiguration) classifyGlobalBehavior(
