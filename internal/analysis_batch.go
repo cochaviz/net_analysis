@@ -340,7 +340,7 @@ func (config *AnalysisConfiguration) flushResults() {
 	// then classify local behavior
 	for host, count := range config.result.hostPacketCounts {
 		packetRate := float64(count) / durationSeconds
-		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart)
+		localBehavior := config.classifyLocalBehavior(packetRate, host, config.result.windowStart, globalBehavior)
 		var captured []gopacket.Packet
 
 		if capture, err := config.captureBehavior(config, localBehavior); err != nil {
@@ -436,6 +436,7 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 	packetRate float64,
 	destinationIP string,
 	eventTime time.Time,
+	globalBehavior *Behavior,
 ) *Behavior {
 	config.logger.Debug(
 		"Classifying local behavior",
@@ -444,7 +445,7 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 		"destinationIP", destinationIP,
 	)
 
-	// attacks can only occur if a C2 IP is specified
+	// attacks can only occur if a C2 IP is specified (assumed)
 	if config.context.c2IP != "" && packetRate > config.PacketRateThreshold {
 		return &Behavior{
 			Classification:  Attack,
@@ -458,6 +459,11 @@ func (config *AnalysisConfiguration) classifyLocalBehavior(
 			SrcIP:           &config.context.srcIP,
 			SampleID:        config.context.sampleID,
 		}
+	}
+	// if no c2 is specified, or it's a low packet rate, it might be a regular connection
+	// if, however, globally a scan was detected, we cannot determine whether it's part of the scan or not
+	if globalBehavior != nil && globalBehavior.Classification == Scan {
+		return nil
 	}
 	return &Behavior{
 		Classification:  OutboundConnection,
