@@ -379,6 +379,8 @@ func (config *AnalysisConfiguration) logBehavior(
 		config.summary.AttackEvents++
 	case Scan:
 		config.summary.ScanEvents++
+	case OutboundConnection:
+		// outbound events are logged to Eve but don't alter the summary
 	default:
 		return
 	}

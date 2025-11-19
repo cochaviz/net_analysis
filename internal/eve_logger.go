@@ -133,7 +133,7 @@ func behaviorToEveEvent(behavior *Behavior) *EveEvent {
 
 func eventTypeFromBehavior(behavior *Behavior) string {
 	switch behavior.Classification {
-	case Attack, Scan:
+	case Attack, Scan, OutboundConnection:
 		return "alert"
 	default:
 		return "stats"
@@ -142,7 +142,7 @@ func eventTypeFromBehavior(behavior *Behavior) string {
 
 func newEveAlertFromBehavior(behavior *Behavior) *EveAlert {
 	switch behavior.Classification {
-	case Attack, Scan:
+	case Attack, Scan, OutboundConnection:
 	default:
 		return nil
 	}
@@ -214,6 +214,8 @@ func signatureForBehavior(behavior *Behavior) string {
 		return "gomon high packet-rate to single host"
 	case Scan:
 		return "gomon destination scan volume exceeded"
+	case OutboundConnection:
+		return "gomon outbound connection observed"
 	default:
 		return "gomon event"
 	}
@@ -225,6 +227,8 @@ func categoryForBehavior(class BehaviorClass) string {
 		return "attack"
 	case Scan:
 		return "scan"
+	case OutboundConnection:
+		return "connection"
 	default:
 		return "unsuspicious"
 	}
@@ -236,6 +240,8 @@ func severityForBehavior(class BehaviorClass) int {
 		return 2
 	case Scan:
 		return 3
+	case OutboundConnection:
+		return 1
 	default:
 		return 1
 	}
@@ -247,6 +253,8 @@ func signatureIDForBehavior(class BehaviorClass) int {
 		return 2100001
 	case Scan:
 		return 2100002
+	case OutboundConnection:
+		return 2100003
 	default:
 		return 2100000
 	}
