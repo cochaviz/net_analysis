@@ -126,6 +126,7 @@ structured alerts that highlight scans or bursts of suspicious activity.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		cmd.Println(asciiBanner)
 		cmd.Println()
+		cmd.Print(renderRuntimeConfiguration(args))
 	},
 	RunE: executeAnalysis,
 }
@@ -265,4 +266,68 @@ func ensureOutputDir(dirPath string) error {
 	}
 
 	return fmt.Errorf("unable to access output directory %q: %w", dirPath, err)
+}
+
+func renderRuntimeConfiguration(args []string) string {
+	const placeholder = "<unset>"
+
+	var inputArg, srcArg string
+	if len(args) > 0 {
+		inputArg = args[0]
+	} else {
+		inputArg = placeholder
+	}
+	if len(args) > 1 {
+		srcArg = args[1]
+	} else {
+		srcArg = placeholder
+	}
+
+	window := (time.Duration(windowSizeSeconds) * time.Second).String()
+
+	captureDir := captureDirPath
+	if captureDir == "" {
+		captureDir = filepath.Join(".", "captures")
+	}
+	captureDir = filepath.Clean(captureDir)
+
+	eveDestination := "stdout"
+	if eveLogPath != "" {
+		eveDestination = filepath.Clean(eveLogPath)
+	}
+
+	var ignoredDest string
+	switch len(ignoreDestIPs) {
+	case 0:
+		ignoredDest = "<none>"
+	default:
+		ignoredDest = strings.Join(ignoreDestIPs, ", ")
+	}
+
+	c2Display := c2IP
+	if c2Display == "" {
+		c2Display = "<none>"
+	}
+	sampleDisplay := sampleID
+	if sampleDisplay == "" {
+		sampleDisplay = "<none>"
+	}
+
+	var b strings.Builder
+	b.WriteString("Configuration:\n")
+	fmt.Fprintf(&b, "  input: %s\n", inputArg)
+	fmt.Fprintf(&b, "  source-ip: %s\n", srcArg)
+	fmt.Fprintf(&b, "  window: %s\n", window)
+	fmt.Fprintf(&b, "  packet-threshold: %.2f\n", packetRateThreshold)
+	fmt.Fprintf(&b, "  ip-threshold: %.2f\n", uniqueIPRateThreshold)
+	fmt.Fprintf(&b, "  log-level: %s\n", logLevelStr)
+	fmt.Fprintf(&b, "  show-idle: %t\n", showIdle)
+	fmt.Fprintf(&b, "  c2-ip: %s\n", c2Display)
+	fmt.Fprintf(&b, "  sample-id: %s\n", sampleDisplay)
+	fmt.Fprintf(&b, "  ignore-dst: %s\n", ignoredDest)
+	fmt.Fprintf(&b, "  save-packets: %d\n", savePacketsCount)
+	fmt.Fprintf(&b, "  capture-dir: %s\n", captureDir)
+	fmt.Fprintf(&b, "  eve-log-path: %s\n", eveDestination)
+
+	return b.String()
 }
